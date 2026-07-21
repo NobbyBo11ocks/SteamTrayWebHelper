@@ -73,6 +73,17 @@ The result is `src/bin/umpdc.dll`.
 
 Originally created by [Aetopia](https://github.com/Aetopia) — [Aetopia/NoSteamWebHelper](https://github.com/Aetopia/NoSteamWebHelper). This repository is a maintained continuation of that project.
 
+### Changes from the original
+
+- **Custom tray icon** reflecting live state (a blue window for enabled, a red "disabled" glyph for off) instead of the generic stock application icon, at every size from 16px up to 256px.
+- **Decoupled the manual override from Steam's own state.** The original wrote directly into `HKCU\SOFTWARE\Valve\Steam\RunningAppID` — the same value Steam itself uses to track your running game — so toggling it manually could confuse Steam's own UI (friends status, playtime tracking). The override now lives in a private registry value instead, with a new **Automatic** menu option to return to following Steam's real state.
+- **Fixed a 100%-CPU busy-loop**: if opening the Steam registry key ever failed, the original fell into a wait call on a null handle that fails instantly and reissues forever. It now bails out cleanly instead.
+- **Fixed a silent state-reset bug**: the original menu used the same ID (`0`) for "On" and for "no selection," so dismissing the tray menu without picking anything silently forced CEF back on. Menu items now have distinct IDs.
+- **Fixed a GDI handle leak**: the tray icon was reloaded from the module on every single state change without freeing the previous handle. Icons are now loaded once and cached.
+- **Lighter process enumeration**: replaced `WTSEnumerateProcessesW` + a separate `NtQueryInformationProcess` parent-PID lookup with a single `CreateToolhelp32Snapshot` pass, dropping the `ntdll.dll` and `wtsapi32.dll` dependencies entirely.
+- **Added an embedded VERSIONINFO resource**, so the DLL shows proper file/product details in Explorer's Properties dialog.
+- Menu now shows a checkmark on the currently active state.
+
 ## License
 
 [GPL-3.0](LICENSE).
