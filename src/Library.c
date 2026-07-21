@@ -23,6 +23,13 @@
 static DWORD WINAPI ThreadProc(LPVOID lpParameter);
 static HWND hTrayWnd;
 
+// DllMainCRTStartup's hLibModule, not GetModuleHandleW(NULL): this code runs
+// inside steam.exe's process, and GetModuleHandleW(NULL) would resolve to
+// steam.exe's own module rather than this DLL, which is where the icon
+// resources actually live. Loading resources against the wrong module
+// returns NULL, leaving the tray icon blank.
+static HINSTANCE hModule;
+
 static DWORD GetOverride(VOID)
 {
     DWORD value = OVERRIDE_AUTO;
@@ -58,10 +65,9 @@ static VOID EnsureTrayIconsLoaded(VOID)
 {
     if (hIconOn)
         return;
-    HINSTANCE hInst = GetModuleHandleW(NULL);
     int cx = GetSystemMetrics(SM_CXSMICON), cy = GetSystemMetrics(SM_CYSMICON);
-    hIconOn = LoadImageW(hInst, MAKEINTRESOURCEW(IDR_ICON_ON), IMAGE_ICON, cx, cy, LR_DEFAULTCOLOR);
-    hIconOff = LoadImageW(hInst, MAKEINTRESOURCEW(IDR_ICON_OFF), IMAGE_ICON, cx, cy, LR_DEFAULTCOLOR);
+    hIconOn = LoadImageW(hModule, MAKEINTRESOURCEW(IDR_ICON_ON), IMAGE_ICON, cx, cy, LR_DEFAULTCOLOR);
+    hIconOff = LoadImageW(hModule, MAKEINTRESOURCEW(IDR_ICON_OFF), IMAGE_ICON, cx, cy, LR_DEFAULTCOLOR);
 }
 
 static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
@@ -231,8 +237,8 @@ static DWORD WINAPI ThreadProc(LPVOID lpParameter)
         CreateWindowExW(
             WS_EX_LEFT | WS_EX_LTRREADING,
             (LPCWSTR)(ULONG_PTR)RegisterClassW(&((WNDCLASSW){
-                .lpszClassName = L" ", .hInstance = GetModuleHandleW(NULL), .lpfnWndProc = (WNDPROC)WndProc})),
-            NULL, WS_OVERLAPPED, 0, 0, 0, 0, NULL, NULL, GetModuleHandleW(NULL), NULL);
+                .lpszClassName = L" ", .hInstance = hModule, .lpfnWndProc = (WNDPROC)WndProc})),
+            NULL, WS_OVERLAPPED, 0, 0, 0, 0, NULL, NULL, hModule, NULL);
 
     MSG _ = {};
     while (GetMessageW(&_, NULL, (UINT){}, (UINT){}))
@@ -247,6 +253,7 @@ BOOL WINAPI DllMainCRTStartup(HINSTANCE hLibModule, DWORD dwReason, LPVOID lpRes
 {
     if (dwReason == DLL_PROCESS_ATTACH)
     {
+        hModule = hLibModule;
         DisableThreadLibraryCalls(hLibModule);
         CloseHandle(CreateThread(NULL, 0, ThreadProc, (LPVOID)TRUE, 0, NULL));
     }
