@@ -30,6 +30,9 @@ static HWND hTrayWnd;
 // returns NULL, leaving the tray icon blank.
 static HINSTANCE hModule;
 
+static volatile LONG gTrayThreadStarted;
+static volatile LONG gWatcherThreadStarted;
+
 static DWORD GetOverride(VOID)
 {
     DWORD value = OVERRIDE_AUTO;
@@ -174,9 +177,24 @@ static VOID CALLBACK WinEventProc(HWINEVENTHOOK hWinEventHook, DWORD event, HWND
         GetWindowTextLengthW(hwnd) < 1)
         return;
 
-    CloseHandle(CreateThread(NULL, 0, ThreadProc, (LPVOID)FALSE, 0, NULL));
+    if (InterlockedCompareExchange(&gTrayThreadStarted, 1, 0) == 0)
+    {
+        HANDLE hTrayThread = CreateThread(NULL, 0, ThreadProc, (LPVOID)FALSE, 0, NULL);
+        if (hTrayThread)
+            CloseHandle(hTrayThread);
+        else
+            InterlockedExchange(&gTrayThreadStarted, 0);
+    }
+
+    if (InterlockedCompareExchange(&gWatcherThreadStarted, 1, 0) != 0)
+        return;
 
     HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, dwEventThread);
+    if (!hThread)
+    {
+        InterlockedExchange(&gWatcherThreadStarted, 0);
+        return;
+    }
 
     HKEY hSteamKey = NULL, hOverrideKey = NULL;
     // Bail out rather than arming a wait on a NULL key, which would fail
@@ -191,6 +209,7 @@ static VOID CALLBACK WinEventProc(HWINEVENTHOOK hWinEventHook, DWORD event, HWND
         if (hOverrideKey)
             RegCloseKey(hOverrideKey);
         CloseHandle(hThread);
+        InterlockedExchange(&gWatcherThreadStarted, 0);
         return;
     }
 
@@ -226,6 +245,7 @@ static VOID CALLBACK WinEventProc(HWINEVENTHOOK hWinEventHook, DWORD event, HWND
     RegCloseKey(hSteamKey);
     RegCloseKey(hOverrideKey);
     CloseHandle(hThread);
+    InterlockedExchange(&gWatcherThreadStarted, 0);
 }
 
 static DWORD WINAPI ThreadProc(LPVOID lpParameter)
