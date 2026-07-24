@@ -1,104 +1,297 @@
-# NoSteamWebHelper
+<div align="center">
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+<img src="docs/images/cef-enabled.png" width="112" alt="SteamTrayWebHelper icon">
 
-A small Windows DLL that automatically disables Steam's CEF (Chromium Embedded Framework) while you're in a game, and re-enables it when you're back at the menu — with a tray icon to see and override the state at a glance.
+# SteamTrayWebHelper
 
-## Why
+### A lighter, smarter way to manage Steam WebHelper while gaming
 
-Steam used to ship a `-no-browser` launch parameter that disabled its embedded Chromium browser, cutting down on the RAM and CPU it uses in the background. Valve [removed it](https://steamcommunity.com/groups/SteamClientBeta/discussions/3/3710433479207750727/?ctp=42). NoSteamWebHelper restores that behavior automatically, without needing a permanent launch flag.
+Automatically disables Steam's Chromium-based WebHelper when a game is running, restores it when you return to Steam, and gives you complete control from a clear system-tray interface.
 
-## How it works
+[![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows&logoColor=white)](#requirements)
+[![Architecture](https://img.shields.io/badge/Architecture-x86--64-555555)](#requirements)
+[![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
+[![Open Source](https://img.shields.io/badge/Open%20Source-Yes-success)](#building-from-source)
 
-- **If a game is running**, CEF is disabled and Steam's `steamwebhelper.exe` (the Chromium process backing Steam's UI) is shut down, freeing up its memory and CPU for your game.
-- **If no game is running**, CEF is left enabled and Steam's browser UI behaves normally.
-- Everything is driven by real state changes (registry notifications and Steam's own window events) — there's no polling, so the DLL uses effectively no CPU while idle.
+## [Download the latest release](../../releases/latest)
 
-You can also override this from the tray icon:
+**Choose the installer `.exe` for the easiest setup, or download `umpdc.dll` separately for a completely manual installation.**
 
-| Icon | Tray tooltip | Meaning |
+</div>
+
+---
+
+## What it does
+
+Steam uses multiple `steamwebhelper.exe` processes to power its modern interface. Those Chromium-based processes can continue consuming memory and CPU while a game is running.
+
+SteamTrayWebHelper automatically manages that behaviour:
+
+- **Game running:** disables CEF and closes Steam WebHelper processes.
+- **No game running:** restores CEF so the Steam interface works normally.
+- **Manual control:** switch between **Automatic**, **On**, and **Off** from the tray menu.
+- **Event-driven operation:** reacts to Steam and Windows state changes without constant background polling.
+
+The result is a small, native Windows utility focused on reducing unnecessary Steam background activity during gameplay without permanently breaking access to the Steam client.
+
+> [!IMPORTANT]
+> SteamTrayWebHelper is not affiliated with, endorsed by, or supported by Valve Corporation. Steam updates can change internal client behaviour, so always keep a copy of the latest release available.
+
+---
+
+## Download options
+
+Both installation methods are provided as **separate assets on the Releases page**.
+
+| Download | Best for | What it does |
 |---|---|---|
-| 🔵 blue window | CEF Enabled | Automatic, or manually forced on |
-| 🔴 red window | CEF Disabled | Automatic, or manually forced off |
+| **Installer `.exe`** | Most users | Detects your Steam folder, closes Steam when required, installs the DLL, and provides an uninstaller. |
+| **`umpdc.dll`** | Advanced and portable users | Lets you install the project manually by placing one file beside `steam.exe`. |
 
-Right-click the tray icon for **Automatic** (the default — follows the current game state), **On** (always keep CEF enabled), or **Off** (always keep CEF disabled).
+### Recommended: installer
 
-## Installation
+1. Open the [latest release](../../releases/latest).
+2. Download the installer `.exe`.
+3. Run it as administrator.
+4. Confirm your Steam installation directory.
+5. Start Steam normally.
 
-1. Download `umpdc.dll` from the [Releases](../../releases) page (or [build it yourself](#building)).
-2. Close Steam completely.
-3. Copy `umpdc.dll` into your Steam installation folder — the same folder as `steam.exe`.
-4. Launch Steam. A tray icon will appear once Steam finishes starting up.
+### Manual installation
 
-> [!NOTE]
-> Pass `-silent` to Steam's shortcut if you don't want its window to pop up automatically when CEF is re-enabled.
+1. Open the [latest release](../../releases/latest).
+2. Download **`umpdc.dll`**.
+3. Exit Steam completely, including its notification-area icon.
+4. Copy `umpdc.dll` into the folder containing `steam.exe`.
+5. Launch Steam.
 
-To uninstall, close Steam and delete `umpdc.dll` from the Steam folder.
+The default Steam location is usually:
 
-## Building
+```text
+C:\Program Files (x86)\Steam
+```
 
-Requires an x86-64 MinGW-w64 GCC toolchain targeting UCRT (no other dependencies — the source links directly against the Win32 API).
+To uninstall manually, close Steam and delete `umpdc.dll` from the Steam directory.
 
-1. Install [MSYS2](https://www.msys2.org) and update it:
+---
 
-    ```bash
-    pacman -Syu --noconfirm
-    ```
+## Tray icons and controls
 
-2. Install GCC:
+The included icon artwork uses **transparent backgrounds**, so it remains clean in both light and dark Windows notification areas.
 
-    ```bash
-    pacman -S mingw-w64-ucrt-x86_64-gcc --noconfirm
-    ```
+<table>
+  <tr>
+    <th width="150">Tray icon</th>
+    <th>Status</th>
+    <th>Meaning</th>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/images/cef-enabled.png" width="82" alt="CEF enabled icon"></td>
+    <td><strong>CEF Enabled</strong></td>
+    <td>Steam WebHelper is available and Steam's full browser-based interface can run normally.</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/images/cef-disabled.png" width="82" alt="CEF disabled icon"></td>
+    <td><strong>CEF Disabled</strong></td>
+    <td>Steam WebHelper is disabled to reduce unnecessary background activity while gaming.</td>
+  </tr>
+</table>
 
-3. From a UCRT64 shell, in the `src` directory:
+Right-click the tray icon to select:
 
-    ```bash
-    mkdir -p bin
-    windres res/icon.rc -O coff -o bin/icon.res
-    gcc -Oz -Wall -Wextra \
-        -Wl,--gc-sections,--exclude-all-symbols,--dynamicbase,--nxcompat,--high-entropy-va \
-        -municode -shared -nostdlib -s \
-        Library.c bin/icon.res -lkernel32 -luser32 -ladvapi32 -lshell32 -lgdi32 -o bin/umpdc.dll
-    ```
+| Mode | Behaviour |
+|---|---|
+| **Automatic** | Recommended. Follows Steam's real game-running state. |
+| **On** | Forces CEF and Steam WebHelper to remain enabled. |
+| **Off** | Forces CEF and Steam WebHelper to remain disabled. |
 
-The result is `src/bin/umpdc.dll`.
+The active mode is marked directly in the tray menu.
 
-## Project layout
+---
 
-- `src/Library.c` — the DLL itself.
-- `src/res/icon.rc` — resource script embedding the tray icons and version info.
-- `src/res/icon_on.ico`, `src/res/icon_off.ico` — tray icons for each state.
-- `src/res/make_icon.py` — regenerates the two `.ico` files (requires Python + Pillow); only needed if you want to change the icon artwork.
+## Why this version is significantly improved
+
+SteamTrayWebHelper is a modern continuation of [Aetopia's NoSteamWebHelper](https://github.com/Aetopia/NoSteamWebHelper), not a simple rename or repack.
+
+The original repository is now **archived, read-only, and marked deprecated**. This version keeps the useful core idea while addressing reliability issues, improving control, modernising the user experience, and adding a proper release workflow.
+
+| Area | Aetopia version | SteamTrayWebHelper |
+|---|---|---|
+| Project status | Archived and deprecated | Actively improved continuation |
+| Downloads | Manual DLL-focused installation | Separate installer `.exe` and manual `umpdc.dll` assets |
+| Tray appearance | Generic application icon | Purpose-built live status icons with transparent backgrounds |
+| User controls | Basic manual toggle | **Automatic**, **On**, and **Off** modes with active-state checkmark |
+| Registry handling | Manual override reused Steam's own `RunningAppID` value | Override stored in a private project registry key, avoiding interference with Steam state |
+| Menu reliability | Dismissing the menu could silently change state | Unique command IDs prevent accidental state changes |
+| CPU failure handling | Registry and resume failures could cause tight loops | Failure paths are checked and exit cleanly |
+| Resource management | Tray icons could leak GDI handles | Icons are loaded once and reused |
+| Event handling | Watcher logic could block event delivery | Dedicated, restartable registry watcher thread |
+| Process detection | Heavier multi-API enumeration | Single Toolhelp snapshot pass with fewer dependencies |
+| Explorer restarts | Tray icon could disappear | Icon is restored after taskbar/Explorer recreation |
+| Binary metadata | Minimal file information | Embedded product and version information |
+| Build security | Basic linker configuration | ASLR, high-entropy VA, DEP/NX compatibility, stripped release binary |
+| Release verification | No automated checksum workflow | CI-built DLL plus SHA-256 checksum on tagged releases |
+
+### Reliability fixes included
+
+- Fixed a possible **100% CPU loop** when the Steam registry key cannot be opened.
+- Fixed a second possible **100% CPU loop** if resuming Steam's thread fails.
+- Fixed accidental mode changes when the tray menu is dismissed without a selection.
+- Fixed tray icon GDI handle leakage across repeated state changes.
+- Added validation for events and registry notification setup.
+- Prevented failed thread suspensions from being recorded as successful.
+- Moved the registry watcher out of the WinEvent callback so event delivery remains responsive.
+- Corrected notification-area menu behaviour using right-button-up handling and the documented `WM_NULL` follow-up.
+- Added automatic tray-icon recovery after Windows Explorer restarts.
+
+---
+
+## Design goals
+
+- **Small:** one native DLL for manual installation.
+- **Low overhead:** no runtime framework and no constant polling loop.
+- **Transparent:** open-source C implementation with a reproducible build process.
+- **Controllable:** automatic operation with immediate manual override.
+- **Recoverable:** remove one DLL to return Steam to its normal state.
+- **Verifiable:** tagged releases include a SHA-256 checksum for the DLL.
+
+---
+
+## Requirements
+
+- Windows 10 or Windows 11
+- 64-bit Steam client
+- Administrator permission when installing into `Program Files`
+
+No separate runtime, service, account, or configuration application is required.
+
+---
+
+## Troubleshooting
+
+### The tray icon does not appear
+
+- Confirm `umpdc.dll` is in the exact same directory as `steam.exe`.
+- Fully exit Steam, then launch it again.
+- Check Windows' hidden notification-area icons.
+- Remove any older copy of the original NoSteamWebHelper DLL before reinstalling.
+
+### Steam's interface does not return
+
+Right-click the tray icon and select **On**, or close Steam, remove `umpdc.dll`, and start Steam again.
+
+Adding `-silent` to your Steam shortcut can prevent Steam's main window from opening automatically when CEF is restored.
+
+### Antivirus warning
+
+This project loads a DLL from the Steam installation directory and controls Steam processes, which can resemble behaviour used by unwanted software. Review the source, build it yourself, and verify the release checksum when uncertain.
+
+### Steam updated and the tool stopped working
+
+Steam client updates can change implementation details. Remove the DLL to restore normal Steam operation, then check the [Releases](../../releases) page for an updated build.
+
+---
+
+## Verify the manual DLL
+
+Tagged releases include `umpdc.dll.sha256` alongside `umpdc.dll`.
+
+In PowerShell:
+
+```powershell
+Get-FileHash .\umpdc.dll -Algorithm SHA256
+```
+
+Compare the result with the value supplied in the release checksum file.
+
+---
+
+## Building from source
+
+The project uses the native Win32 API and an x86-64 MinGW-w64 UCRT toolchain.
+
+### 1. Install MSYS2
+
+Download and install [MSYS2](https://www.msys2.org/), then update it:
+
+```bash
+pacman -Syu --noconfirm
+```
+
+### 2. Install the compiler
+
+Open an **MSYS2 UCRT64** terminal and run:
+
+```bash
+pacman -S mingw-w64-ucrt-x86_64-gcc --noconfirm
+```
+
+### 3. Build the DLL
+
+From the repository's `src` directory:
+
+```bash
+mkdir -p bin
+windres res/icon.rc -O coff -o bin/icon.res
+gcc -Oz -Wall -Wextra -Werror \
+  -Wl,--gc-sections,--exclude-all-symbols,--dynamicbase,--nxcompat,--high-entropy-va \
+  -municode -shared -nostdlib -s \
+  Library.c bin/icon.res \
+  -lkernel32 -luser32 -ladvapi32 -lshell32 -lgdi32 \
+  -o bin/umpdc.dll
+```
+
+The compiled file will be created at:
+
+```text
+src/bin/umpdc.dll
+```
+
+---
+
+## Project structure
+
+```text
+SteamTrayWebHelper/
+├── .github/
+│   └── workflows/
+│       └── build.yml
+├── docs/
+│   └── images/
+│       ├── cef-enabled.png
+│       └── cef-disabled.png
+├── installer/
+│   └── NoSteamWebHelper.iss
+├── src/
+│   ├── Library.c
+│   ├── bin/
+│   │   └── umpdc.dll
+│   └── res/
+│       ├── icon.rc
+│       ├── icon_on.ico
+│       ├── icon_off.ico
+│       └── make_icon.py
+├── LICENSE
+└── README.md
+```
+
+---
 
 ## Credits
 
-Originally created by [Aetopia](https://github.com/Aetopia) — [Aetopia/NoSteamWebHelper](https://github.com/Aetopia/NoSteamWebHelper). This repository is a maintained continuation of that project.
+The original concept and implementation were created by [Aetopia](https://github.com/Aetopia) in [Aetopia/NoSteamWebHelper](https://github.com/Aetopia/NoSteamWebHelper).
 
-### Changes from the original
+SteamTrayWebHelper preserves that project's core idea while providing substantial reliability fixes, improved state handling, custom status visuals, hardened builds, automated releases, checksums, and both installer-based and manual distribution options.
 
-#### v1.0
-
-- **Custom tray icon** reflecting live state (a blue window for enabled, a red "disabled" glyph for off) instead of the generic stock application icon, at every size from 16px up to 256px.
-- **Decoupled the manual override from Steam's own state.** The original wrote directly into `HKCU\SOFTWARE\Valve\Steam\RunningAppID` — the same value Steam itself uses to track your running game — so toggling it manually could confuse Steam's own UI (friends status, playtime tracking). The override now lives in a private registry value instead, with a new **Automatic** menu option to return to following Steam's real state.
-- **Fixed a 100%-CPU busy-loop**: if opening the Steam registry key ever failed, the original fell into a wait call on a null handle that fails instantly and reissues forever. It now bails out cleanly instead.
-- **Fixed a silent state-reset bug**: the original menu used the same ID (`0`) for "On" and for "no selection," so dismissing the tray menu without picking anything silently forced CEF back on. Menu items now have distinct IDs.
-- **Fixed a GDI handle leak**: the tray icon was reloaded from the module on every single state change without freeing the previous handle. Icons are now loaded once and cached.
-- **Lighter process enumeration**: replaced `WTSEnumerateProcessesW` + a separate `NtQueryInformationProcess` parent-PID lookup with a single `CreateToolhelp32Snapshot` pass, dropping the `ntdll.dll` and `wtsapi32.dll` dependencies entirely.
-- **Added an embedded VERSIONINFO resource**, so the DLL shows proper file/product details in Explorer's Properties dialog.
-- Menu now shows a checkmark on the currently active state.
-
-#### v1.1
-
-- **Fixed a potential 100%-CPU spin on resume**: `ResumeThread`'s failure code `(DWORD)-1` compares greater than `1` unsigned, so the resume-drain loop would spin forever if the Steam thread handle ever went bad. The loop now breaks out explicitly on failure.
-- **The registry watcher runs on its own thread** instead of looping forever inside the WinEvent hook callback. Blocking the hook callback stalled that thread's message pump, so no further window events could ever be delivered — meaning the watcher could never restart after a failure. Now the callback returns immediately and the watcher is restartable.
-- **All event/notification setup is error-checked**: `CreateEventW` and every `RegNotifyChangeKeyValue` arm/re-arm are verified, so a failure shuts the watcher down cleanly (resuming Steam's thread) instead of waiting forever on an event that can no longer fire, or erroring in a tight loop.
-- **`SuspendThread` failures are no longer recorded as a successful suspension**, keeping the suspend-count bookkeeping honest.
-- **Tray menu opens on right-button *up*** (shell convention) and posts the documented `WM_NULL` after `TrackPopupMenu`, fixing the classic quirk where the second right-click on a tray menu doesn't open.
-- **Build hardening**: DLL now links with `--dynamicbase`, `--high-entropy-va`, and `--nxcompat` (full ASLR + DEP), and compiles warning-clean under `-Wall -Wextra`.
-- **CI**: GitHub Actions now builds the DLL on every push, publishes a SHA-256 checksum, and attaches both to releases on version tags.
-- Internal cleanup: descriptive identifiers replace the `_`/`$` placeholder names (`$` in an identifier is a non-standard GCC extension), and the tray window class has a proper name instead of `" "`.
+---
 
 ## License
 
-[GPL-3.0](LICENSE).
+Distributed under the [GNU General Public License v3.0](LICENSE).
+
+<div align="center">
+
+**Reduce unnecessary Steam background activity. Keep control one click away.**
+
+[Download the latest release](../../releases/latest)
+
+</div>
