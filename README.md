@@ -56,8 +56,10 @@ Requires an x86-64 MinGW-w64 GCC toolchain targeting UCRT (no other dependencies
     ```bash
     mkdir -p bin
     windres res/icon.rc -O coff -o bin/icon.res
-    gcc -Oz -Wl,--gc-sections,--exclude-all-symbols -municode -shared -nostdlib -s \
-        Library.c bin/icon.res -lkernel32 -luser32 -ladvapi32 -lshell32 -o bin/umpdc.dll
+    gcc -Oz -Wall -Wextra \
+        -Wl,--gc-sections,--exclude-all-symbols,--dynamicbase,--nxcompat,--high-entropy-va \
+        -municode -shared -nostdlib -s \
+        Library.c bin/icon.res -lkernel32 -luser32 -ladvapi32 -lshell32 -lgdi32 -o bin/umpdc.dll
     ```
 
 The result is `src/bin/umpdc.dll`.
@@ -75,6 +77,8 @@ Originally created by [Aetopia](https://github.com/Aetopia) — [Aetopia/NoSteam
 
 ### Changes from the original
 
+#### v1.0
+
 - **Custom tray icon** reflecting live state (a blue window for enabled, a red "disabled" glyph for off) instead of the generic stock application icon, at every size from 16px up to 256px.
 - **Decoupled the manual override from Steam's own state.** The original wrote directly into `HKCU\SOFTWARE\Valve\Steam\RunningAppID` — the same value Steam itself uses to track your running game — so toggling it manually could confuse Steam's own UI (friends status, playtime tracking). The override now lives in a private registry value instead, with a new **Automatic** menu option to return to following Steam's real state.
 - **Fixed a 100%-CPU busy-loop**: if opening the Steam registry key ever failed, the original fell into a wait call on a null handle that fails instantly and reissues forever. It now bails out cleanly instead.
@@ -83,6 +87,17 @@ Originally created by [Aetopia](https://github.com/Aetopia) — [Aetopia/NoSteam
 - **Lighter process enumeration**: replaced `WTSEnumerateProcessesW` + a separate `NtQueryInformationProcess` parent-PID lookup with a single `CreateToolhelp32Snapshot` pass, dropping the `ntdll.dll` and `wtsapi32.dll` dependencies entirely.
 - **Added an embedded VERSIONINFO resource**, so the DLL shows proper file/product details in Explorer's Properties dialog.
 - Menu now shows a checkmark on the currently active state.
+
+#### v1.1
+
+- **Fixed a potential 100%-CPU spin on resume**: `ResumeThread`'s failure code `(DWORD)-1` compares greater than `1` unsigned, so the resume-drain loop would spin forever if the Steam thread handle ever went bad. The loop now breaks out explicitly on failure.
+- **The registry watcher runs on its own thread** instead of looping forever inside the WinEvent hook callback. Blocking the hook callback stalled that thread's message pump, so no further window events could ever be delivered — meaning the watcher could never restart after a failure. Now the callback returns immediately and the watcher is restartable.
+- **All event/notification setup is error-checked**: `CreateEventW` and every `RegNotifyChangeKeyValue` arm/re-arm are verified, so a failure shuts the watcher down cleanly (resuming Steam's thread) instead of waiting forever on an event that can no longer fire, or erroring in a tight loop.
+- **`SuspendThread` failures are no longer recorded as a successful suspension**, keeping the suspend-count bookkeeping honest.
+- **Tray menu opens on right-button *up*** (shell convention) and posts the documented `WM_NULL` after `TrackPopupMenu`, fixing the classic quirk where the second right-click on a tray menu doesn't open.
+- **Build hardening**: DLL now links with `--dynamicbase`, `--high-entropy-va`, and `--nxcompat` (full ASLR + DEP), and compiles warning-clean under `-Wall -Wextra`.
+- **CI**: GitHub Actions now builds the DLL on every push, publishes a SHA-256 checksum, and attaches both to releases on version tags.
+- Internal cleanup: descriptive identifiers replace the `_`/`$` placeholder names (`$` in an identifier is a non-standard GCC extension), and the tray window class has a proper name instead of `" "`.
 
 ## License
 
