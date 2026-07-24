@@ -1,7 +1,5 @@
 <div align="center">
 
-<img src="docs/images/cef-enabled.png" width="112" alt="SteamTrayWebHelper enabled tray icon">
-
 # SteamTrayWebHelper
 
 ### Automatically reduce Steam WebHelper activity while you play
