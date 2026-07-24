@@ -192,6 +192,8 @@ Right-click the tray icon and select **On**. Alternatively, close Steam, remove 
 
 Adding `-silent` to a Steam shortcut can prevent the main Steam window from opening automatically when CEF is restored.
 
+"C:\Program Files (x86)\Steam\Steam.exe"  -silent
+
 ### Antivirus warning
 
 The project loads a DLL from the Steam installation directory and controls Steam child processes. Some security products may flag that behaviour heuristically. Review the source code, build it yourself, and compare the downloaded file's SHA-256 digest with the value displayed by GitHub.
