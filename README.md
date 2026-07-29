@@ -209,6 +209,8 @@ Adding `-silent` to a Steam shortcut additionally stops the main window from ope
 "C:\Program Files (x86)\Steam\Steam.exe"  -silent
 ```
 
+"C:\Program Files (x86)\Steam\Steam.exe"  -silent
+
 ### Antivirus warning
 
 The project loads a DLL from the Steam installation directory and controls Steam child processes. Some security products may flag that behaviour heuristically. Review the source code, build it yourself, and compare the downloaded file's SHA-256 digest with the value displayed by GitHub.
