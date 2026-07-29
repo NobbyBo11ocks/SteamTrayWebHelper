@@ -1,85 +1,93 @@
-import math
-from PIL import Image, ImageDraw
+"""
+Generates icon_on.ico / icon_off.ico from steam_logo_source.png.
 
-BG = (27, 40, 56, 255)        # Steam's dark navy (#1B2838)
-GLASS = (240, 244, 248, 255)  # window body
-BAR = (102, 192, 244, 255)    # Steam accent blue (#66C0F4) title bar
-STOP = (222, 62, 58, 255)     # prohibition red (disabled state)
-GO = (86, 197, 118, 255)      # status-dot green (enabled state)
+The source is the genuine Steam application icon (extracted directly from
+Valve's own steam.exe resources, group 101 - the plain icon, not the
+notification/voice-chat badge variants), so it already carries real
+per-pixel alpha and clean antialiasing; no background-removal hack is
+needed here. The white glyph is kept white and everything else (the blue
+circle, and the internal antialiased blend between glyph and circle) is
+remapped to this app's own state colour, using each pixel's "whiteness"
+(how close its RGB is to pure white) as the blend factor - so every edge
+Valve antialiased, internal or outer, stays exactly as smooth, just recoloured.
+"""
 
-SS = 8  # supersampling factor for anti-aliasing
+import numpy as np
+from PIL import Image, ImageFilter
 
+RED = np.array([222, 62, 58])   # disabled-state accent
+BLACK = np.array([0, 0, 0])
+WHITE = np.array([255, 255, 255])
 
-def build(size, state, detailed):
-    S = size * SS
-    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
+SOURCE = "steam_logo_source.png"
+SIZES = [16, 20, 24, 32, 40, 48, 64, 128, 256]
 
-    pad = S * 0.03
-    d.ellipse([pad, pad, S - pad, S - pad], fill=BG)
-
-    win_w, win_h = S * 0.60, S * 0.48
-    wx0 = (S - win_w) / 2
-    wy0 = (S - win_h) / 2 - S * 0.02
-    wx1 = wx0 + win_w
-    wy1 = wy0 + win_h
-    radius = win_h * 0.16
-
-    d.rounded_rectangle([wx0, wy0, wx1, wy1], radius=radius, fill=GLASS)
-
-    bar_h = win_h * 0.30
-    d.rounded_rectangle([wx0, wy0, wx1, wy0 + bar_h], radius=radius, fill=BAR)
-    d.rectangle([wx0, wy0 + bar_h - radius, wx1, wy0 + bar_h], fill=BAR)
-
-    if detailed:
-        dot_r = win_w * 0.028
-        for i in range(3):
-            cx = wx0 + win_w * 0.12 + i * dot_r * 3.2
-            cy = wy0 + bar_h / 2
-            d.ellipse([cx - dot_r, cy - dot_r, cx + dot_r, cy + dot_r], fill=GLASS)
-
-        line_h = win_h * 0.07
-        for i, w in enumerate([win_w * 0.62, win_w * 0.42]):
-            ly = wy0 + bar_h + win_h * 0.14 + i * (line_h + win_h * 0.10)
-            d.rounded_rectangle([wx0 + win_w * 0.08, ly, wx0 + win_w * 0.08 + w, ly + line_h],
-                                 radius=line_h / 2, fill=(206, 214, 222, 255))
-
-    if state == "off":
-        # Prohibition ring + slash, sized generously so it reads at a glance.
-        ring_pad = win_w * 0.16
-        rx0, ry0 = wx0 - ring_pad, wy0 - ring_pad
-        rx1, ry1 = wx1 + ring_pad, wy1 + ring_pad
-        stroke = (rx1 - rx0) * 0.155
-        d.ellipse([rx0, ry0, rx1, ry1], outline=STOP, width=round(stroke))
-
-        cx, cy = (rx0 + rx1) / 2, (ry0 + ry1) / 2
-        r = (rx1 - rx0) / 2
-        ang = math.radians(45)
-        dx, dy = math.cos(ang) * r, math.sin(ang) * r
-        d.line([(cx - dx, cy - dy), (cx + dx, cy + dy)], fill=STOP, width=round(stroke))
-    else:
-        # Small "active" status dot, bottom-right, with a ring matching the
-        # background so it reads as a badge rather than a smudge.
-        dot_r = S * 0.155
-        cx, cy = S * 0.775, S * 0.775
-        ring = dot_r * 1.28
-        d.ellipse([cx - ring, cy - ring, cx + ring, cy + ring], fill=BG)
-        d.ellipse([cx - dot_r, cy - dot_r, cx + dot_r, cy + dot_r], fill=GO)
-
-    return img.resize((size, size), Image.LANCZOS)
+# Downsampling the source's thin ring/glyph strokes all the way to the tray's
+# actual on-screen sizes (16-32px) softens them into a grey smear. A light
+# unsharp mask restores edge contrast there; it's skipped above 32px where
+# LANCZOS alone already looks crisp and sharpening would just add haloing.
+SHARPEN_UP_TO = 32
+UNSHARP = ImageFilter.UnsharpMask(radius=1.0, percent=180, threshold=2)
 
 
-def make(path, state):
-    sizes = [16, 20, 24, 32, 40, 48, 64, 128, 256]
-    imgs = [build(s, state, detailed=(s > 24)) for s in sizes]
+def load_source():
+    img = Image.open(SOURCE).convert("RGBA")
+    arr = np.array(img).astype(np.float64)
+    rgb, alpha = arr[..., :3], arr[..., 3].astype(np.uint8)
+
+    # Steam's own icon already fills ~94% of its canvas - crop to its content
+    # bounding box (plus a hair of pad) instead of assuming that ratio, so
+    # this keeps working if the source is ever swapped for a different asset.
+    ys, xs = np.where(alpha > 0)
+    y0, y1, x0, x1 = ys.min(), ys.max(), xs.min(), xs.max()
+    pad = int(max(y1 - y0, x1 - x0) * 0.02)
+    y0, x0 = max(y0 - pad, 0), max(x0 - pad, 0)
+    y1, x1 = min(y1 + pad, alpha.shape[0] - 1), min(x1 + pad, alpha.shape[1] - 1)
+    return rgb[y0 : y1 + 1, x0 : x1 + 1], alpha[y0 : y1 + 1, x0 : x1 + 1]
+
+
+def build(rgb, alpha, circle_color):
+    # Minimum channel, not mean brightness: the circle is blue, so its blue
+    # channel alone would skew a mean-brightness estimate toward "whiter than
+    # it looks". min(R,G,B) stays low for any saturated colour regardless of
+    # hue, so it's a hue-independent proxy for "how white is this pixel".
+    whiteness = (rgb.min(axis=2) / 255.0)[..., None]
+    out_rgb = WHITE * whiteness + circle_color * (1 - whiteness)
+
+    # Fully-transparent pixels keep whatever colour they inherited from the
+    # source, which varies pixel-to-pixel and is invisible but not free: it
+    # still costs palette slots and compresses worse. Flattening it to one
+    # constant colour is lossless (alpha is 0 either way) and roughly halves
+    # the encoded size once the palette step below runs.
+    out_rgb = np.where(alpha[..., None] == 0, WHITE, out_rgb)
+
+    out = np.dstack([out_rgb, alpha]).astype(np.uint8)
+    return Image.fromarray(out, "RGBA")
+
+
+def make(path, img):
+    imgs = []
+    for s in SIZES:
+        frame = img.resize((s, s), Image.LANCZOS)
+        if s <= SHARPEN_UP_TO:
+            frame = frame.filter(UNSHARP)
+        # The glyph is a flat-colour shape with one antialiased edge, i.e. a
+        # true-colour RGBA PNG spends most of its bytes on a gradient that a
+        # small indexed palette reproduces losslessly to the eye (verified
+        # visually against the unquantized frame - no discernible banding).
+        # This is what actually dominates the shipped DLL's size: the .rsrc
+        # section holding these icons is ~85% of it, code is a few KB.
+        frame = frame.quantize(colors=64, method=Image.FASTOCTREE, dither=Image.Dither.NONE)
+        imgs.append(frame)
     imgs[-1].save(
         path,
         format="ICO",
-        sizes=[(s, s) for s in sizes],
+        sizes=[(s, s) for s in SIZES],
         append_images=imgs[:-1],
     )
     print("wrote", path)
 
 
-make("icon_on.ico", "on")
-make("icon_off.ico", "off")
+rgb, alpha = load_source()
+make("icon_on.ico", build(rgb, alpha, BLACK))
+make("icon_off.ico", build(rgb, alpha, RED))

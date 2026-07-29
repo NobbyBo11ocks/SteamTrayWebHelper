@@ -20,7 +20,19 @@ jobs:
         with:
           msystem: UCRT64
           update: true
-          install: mingw-w64-ucrt-x86_64-gcc
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-python-pillow
+            mingw-w64-ucrt-x86_64-python-numpy
+
+      - name: Verify generated icons are up to date
+        working-directory: src/res
+        run: |
+          python make_icon.py
+          git diff --exit-code -- icon_on.ico icon_off.ico || {
+            echo "::error::icon_on.ico/icon_off.ico don't match make_icon.py's output - rerun it (from src/res) and commit the result.";
+            exit 1;
+          }
 
       - name: Build
         working-directory: src

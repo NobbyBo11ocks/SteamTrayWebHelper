@@ -1,3 +1,10 @@
+// README states Windows 10/11 as the only supported OS; pin the SDK target to
+// match rather than relying on the toolchain's default, since that default is
+// otherwise unspecified and QueryFullProcessImageNameW (Vista+) below would
+// silently fail to declare on an older implied target.
+#define WINVER 0x0A00
+#define _WIN32_WINNT 0x0A00
+
 #include <windows.h>
 #include <tlhelp32.h>
 
@@ -7,6 +14,8 @@
 #define IDM_AUTO 101
 #define IDM_ON 102
 #define IDM_OFF 103
+
+#define IDH_TOGGLE 1 // global hotkey id: Ctrl+Alt+L flips the forced On/Off override
 
 #define WM_TRAYSTATE (WM_APP + 1)
 
@@ -30,6 +39,19 @@ static DWORD WINAPI WatcherThreadProc(LPVOID lpParameter);
 // loop. Worst case a post races window destruction and is dropped, which is
 // harmless: WM_CREATE recomputes the state itself.
 static HWND volatile hTrayWnd;
+
+// Armed by the watcher thread when CEF auto-restores after a game exits
+// (never on an explicit "On" pick - see the loop in WatcherThreadProc), and
+// consumed by WinEventProc's EVENT_OBJECT_SHOW handling below, which hides
+// the first Steam window that shows itself afterwards. This is what "-silent"
+// suppresses at Steam's own startup; nothing plays that role for CEF coming
+// back mid-session, so Steam pops its main window back to the foreground
+// every time. A GetTickCount64 deadline, not just a boolean, so a show that
+// was already in flight when the grace period lapses is left alone rather
+// than suppressed indefinitely by a flag nothing ever clears. 64-bit reads/
+// writes of an aligned variable are atomic on the x86-64 target this builds
+// for, so no separate lock is needed between the two threads touching it.
+static volatile ULONGLONG gSuppressShowUntilTick;
 
 // DllMainCRTStartup's hLibModule, not GetModuleHandleW(NULL): this code runs
 // inside steam.exe's process, and GetModuleHandleW(NULL) would resolve to
@@ -90,10 +112,23 @@ static VOID EnsureTrayIconsLoaded(VOID)
 // SetPreferredAppMode: that call is process-wide, and since this DLL lives
 // inside steam.exe it would recolor Steam's own menus too. Owner-drawing paints
 // only our menu and leaves the host process untouched.
-#define DARK_BG RGB(0x2B, 0x2B, 0x2B)      // menu background
-#define DARK_BG_SEL RGB(0x3D, 0x3D, 0x40)  // hovered item
-#define DARK_TEXT RGB(0xF0, 0xF0, 0xF0)    // item text
-#define DARK_SEP RGB(0x45, 0x45, 0x45)     // separator line
+//
+// Every colour below is copied from Steam's own client, not approximated:
+// C:\Program Files (x86)\Steam\resource\styles\steam.styles, the [colors]
+// block and the Menu/MenuItem/MenuItem:hover/MenuItem:selected/MenuSeparator
+// rules. That file is what Steam itself reads to paint its native VGUI
+// menus (including this tray icon's own right-click menu pre-CEF), so this
+// is Steam's actual palette, sourced directly, not a lookalike.
+#define DARK_BG_TOP RGB(56, 60, 68)         // MenuBG1 - gradient top
+#define DARK_BG RGB(41, 45, 51)             // MenuBG2 - gradient bottom / flat fill past y=140
+#define DARK_BG_SEL RGB(25, 55, 84)         // Focus - "background color of any selected menu or list item"
+#define DARK_TEXT RGB(168, 172, 179)        // Label - normal item text
+#define DARK_TEXT_HOVER RGB(255, 255, 255)  // MenuItem:hover textcolor=white
+#define DARK_TEXT_CHECKED RGB(213, 217, 234) // TextHover - MenuItem:selected textcolor
+#define DARK_SEP RGB(76, 84, 93)            // Divider
+#define DARK_ACCENT RGB(102, 192, 244)      // Steam's link/accent blue (#66c0f4), for the checkmark glyph
+#define MENU_GRADIENT_SPAN 140              // Menu.render_bg: gradient(x0,y0,x1,y0+140,...), flat below
+#define MENU_CORNER_RADIUS 6                // Menu.corner_rounding=1 - VGUI doesn't expose the exact px value
 #define MENU_GUTTER 28                      // left checkmark column width (px)
 #define MENU_PAD_RIGHT 18                   // right padding (px)
 
@@ -110,6 +145,24 @@ static const DARKMENUITEM kMiOff = {L"Off", FALSE};
 
 static HFONT hMenuFont;      // the system menu font (SPI_GETNONCLIENTMETRICS)
 static HFONT hMenuCheckFont; // Marlett, for the check glyph ('a')
+
+// Steam's Menu.render_bg is a real per-pixel gradient over the popup's first
+// MENU_GRADIENT_SPAN px, flat fill below that. WM_DRAWITEM only hands us one
+// item's rect at a time, not the whole popup, but DRAWITEMSTRUCT.rcItem is
+// already in menu-client coordinates (not item-relative), so using an item's
+// own vertical midpoint here reproduces the same gradient across the whole
+// menu - just resolved once per item instead of per pixel row, which is
+// indistinguishable at this item height and avoids a msimg32 GradientFill
+// dependency this build doesn't otherwise need.
+static COLORREF MenuGradientAt(int y)
+{
+    if (y >= MENU_GRADIENT_SPAN)
+        return DARK_BG;
+    int r = GetRValue(DARK_BG_TOP) + (GetRValue(DARK_BG) - GetRValue(DARK_BG_TOP)) * y / MENU_GRADIENT_SPAN;
+    int g = GetGValue(DARK_BG_TOP) + (GetGValue(DARK_BG) - GetGValue(DARK_BG_TOP)) * y / MENU_GRADIENT_SPAN;
+    int b = GetBValue(DARK_BG_TOP) + (GetBValue(DARK_BG) - GetBValue(DARK_BG_TOP)) * y / MENU_GRADIENT_SPAN;
+    return RGB(r, g, b);
+}
 
 static VOID EnsureMenuFonts(VOID)
 {
@@ -153,6 +206,12 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         nid.hIcon = disabled ? hIconOff : hIconOn;
         lstrcpyW(nid.szTip, disabled ? L"Steam WebHelper - CEF Disabled" : L"Steam WebHelper - CEF Enabled");
         Shell_NotifyIconW(NIM_ADD, &nid);
+
+        // MOD_NOREPEAT (Win7+) so holding the combo down doesn't flood WM_HOTKEY
+        // and rapidly flip the override back and forth. Failure (e.g. another
+        // app already owns Ctrl+Alt+L) is silently ignored, same as the rest of
+        // this file's non-critical setup calls - the menu is still there.
+        RegisterHotKey(hWnd, IDH_TOGGLE, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'L');
         break;
     }
 
@@ -164,6 +223,19 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         Shell_NotifyIconW(NIM_MODIFY, &nid);
         break;
     }
+
+    case WM_HOTKEY:
+        // Ctrl+Alt+L: flip the forced override rather than just toggling CEF
+        // directly, so the change persists and is visible the same way a menu
+        // pick is - through the private override key, which the watcher thread
+        // already reacts to (icon/tooltip update, thread suspend/resume, and
+        // killing the webhelper children all happen from that single path).
+        if (wParam == IDH_TOGGLE)
+        {
+            DWORD value = ComputeDisabled() ? OVERRIDE_ON : OVERRIDE_OFF;
+            RegSetKeyValueW(HKEY_CURRENT_USER, OVERRIDE_SUBKEY, OVERRIDE_VALUE, REG_DWORD, &value, sizeof(DWORD));
+        }
+        break;
 
     case WM_USER:
         // WM_RBUTTONUP, not DOWN: acting on button-up matches shell convention
@@ -205,6 +277,30 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         }
         break;
 
+    case WM_ENTERIDLE:
+        // Cosmetic match for steam.styles' Menu.corner_rounding=1. Fires
+        // repeatedly while TrackPopupMenu's modal loop is idle-waiting;
+        // #32768 is the fixed, long-stable system class every native popup
+        // menu uses - there's no other way to reach the popup's own HWND,
+        // since TrackPopupMenu never hands it to the owner directly. This is
+        // a best-effort, non-critical touch: if another app's own native
+        // menu happens to be open on the desktop at this exact instant,
+        // FindWindow could round the wrong one, but this only runs for the
+        // few hundred ms the tray menu itself is open.
+        if (wParam == MSGF_MENU)
+        {
+            HWND hMenuWnd = FindWindowW(L"#32768", NULL);
+            RECT rc;
+            if (hMenuWnd && GetWindowRect(hMenuWnd, &rc))
+            {
+                HRGN hRgn =
+                    CreateRoundRectRgn(0, 0, rc.right - rc.left, rc.bottom - rc.top, MENU_CORNER_RADIUS, MENU_CORNER_RADIUS);
+                if (hRgn && !SetWindowRgn(hMenuWnd, hRgn, TRUE))
+                    DeleteObject(hRgn); // ownership only transfers to the window on success
+            }
+        }
+        break;
+
     case WM_MEASUREITEM:
     {
         LPMEASUREITEMSTRUCT mis = (LPMEASUREITEMSTRUCT)lParam;
@@ -239,7 +335,12 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             break;
 
         BOOL selected = (dis->itemState & ODS_SELECTED) && !it->separator;
-        HBRUSH bg = CreateSolidBrush(selected ? DARK_BG_SEL : DARK_BG);
+        // Steam's MenuItem/MenuItem:hover both say bgcolor=none - the highlight
+        // bar comes from the generic "Focus" fill underneath, so it's a flat
+        // solid, not part of the gradient. Everywhere else, the item shows
+        // whatever slice of the popup-wide gradient falls at its own position.
+        HBRUSH bg = CreateSolidBrush(selected ? DARK_BG_SEL
+                                               : MenuGradientAt((dis->rcItem.top + dis->rcItem.bottom) / 2));
         FillRect(dis->hDC, &dis->rcItem, bg);
         DeleteObject(bg);
 
@@ -255,17 +356,22 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         }
         else
         {
+            BOOL checked = dis->itemState & ODS_CHECKED;
             SetBkMode(dis->hDC, TRANSPARENT);
-            SetTextColor(dis->hDC, DARK_TEXT);
 
-            if ((dis->itemState & ODS_CHECKED) && hMenuCheckFont)
+            if (checked && hMenuCheckFont)
             {
                 HGDIOBJ oldF = SelectObject(dis->hDC, hMenuCheckFont);
+                SetTextColor(dis->hDC, DARK_ACCENT);
                 RECT gr = {dis->rcItem.left, dis->rcItem.top, dis->rcItem.left + MENU_GUTTER, dis->rcItem.bottom};
                 DrawTextW(dis->hDC, L"a", 1, &gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE); // Marlett 'a' = check
                 SelectObject(dis->hDC, oldF);
             }
 
+            // Matches steam.styles: MenuItem:hover always wins with white text
+            // regardless of checked state; unhovered falls back to the active
+            // mode's slightly brighter TextHover shade, or plain Label text.
+            SetTextColor(dis->hDC, selected ? DARK_TEXT_HOVER : checked ? DARK_TEXT_CHECKED : DARK_TEXT);
             HGDIOBJ oldF = SelectObject(dis->hDC, hMenuFont);
             RECT tr = dis->rcItem;
             tr.left += MENU_GUTTER;
@@ -280,6 +386,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         // shell to garbage-collect on the next mouse-over. Reached on a clean
         // Steam shutdown / restart into a new session.
         Shell_NotifyIconW(NIM_DELETE, &nid);
+        UnregisterHotKey(hWnd, IDH_TOGGLE);
         hTrayWnd = NULL;
         // Release the cached menu fonts. DEFAULT_GUI_FONT is a stock object and
         // DeleteObject is a harmless no-op on it, so the fallback path is safe.
@@ -306,8 +413,50 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     return DefWindowProcW(hWnd, uMsg, wParam, lParam);
 }
 
+// Directory steam.exe itself runs from, trailing backslash kept so it can be
+// used as a prefix. Populated lazily on first use rather than at DLL load:
+// GetModuleFileNameW(NULL, ...) reads the host process's own image path,
+// which is only meaningful once steam.exe is actually running (it always is
+// by the time this DLL's hooks fire, but not necessarily at DLL_PROCESS_ATTACH).
+static WCHAR gSteamDir[MAX_PATH];
+static DWORD gSteamDirChars;
+
+static BOOL EnsureSteamDir(VOID)
+{
+    if (gSteamDirChars)
+        return TRUE;
+
+    WCHAR path[MAX_PATH];
+    DWORD len = GetModuleFileNameW(NULL, path, MAX_PATH);
+    if (len == 0 || len == MAX_PATH)
+        return FALSE;
+
+    // Manual scan for the last backslash: no CRT is linked (-nostdlib), so
+    // wcsrchr/strrchr aren't available here.
+    DWORD lastSlash = 0;
+    BOOL found = FALSE;
+    for (DWORD i = 0; i < len; i++)
+        if (path[i] == L'\\')
+        {
+            lastSlash = i;
+            found = TRUE;
+        }
+    if (!found)
+        return FALSE;
+
+    // Manual copy, not CopyMemory: RtlCopyMemory expands to a genuine memcpy
+    // call on MinGW headers, and no CRT is linked in (-nostdlib).
+    gSteamDirChars = lastSlash + 1; // keep the trailing backslash for prefix matching
+    for (DWORD i = 0; i < gSteamDirChars; i++)
+        gSteamDir[i] = path[i];
+    return TRUE;
+}
+
 static VOID KillWebHelperChildren(VOID)
 {
+    if (!EnsureSteamDir())
+        return;
+
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnap == INVALID_HANDLE_VALUE)
         return;
@@ -323,10 +472,20 @@ static VOID KillWebHelperChildren(VOID)
             if (pe.th32ParentProcessID == selfPid &&
                 CompareStringOrdinal(pe.szExeFile, -1, L"steamwebhelper.exe", -1, TRUE) == CSTR_EQUAL)
             {
-                HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
+                HANDLE hProcess =
+                    OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
                 if (hProcess)
                 {
-                    TerminateProcess(hProcess, EXIT_SUCCESS);
+                    // Belt-and-braces: only terminate if the child's own image
+                    // actually lives in Steam's install directory, not merely a
+                    // same-named process that happens to be a direct child.
+                    WCHAR imgPath[MAX_PATH];
+                    DWORD imgPathLen = MAX_PATH;
+                    if (QueryFullProcessImageNameW(hProcess, 0, imgPath, &imgPathLen) &&
+                        imgPathLen > gSteamDirChars &&
+                        CompareStringOrdinal(imgPath, (INT)gSteamDirChars, gSteamDir, (INT)gSteamDirChars, TRUE) ==
+                            CSTR_EQUAL)
+                        TerminateProcess(hProcess, EXIT_SUCCESS);
                     CloseHandle(hProcess);
                 }
             }
@@ -429,7 +588,16 @@ static DWORD WINAPI WatcherThreadProc(LPVOID lpParameter)
             break;
 
         BOOL disabled = ComputeDisabled();
+        BOOL wasSuspended = suspended;
         ApplyThreadState(hThread, disabled, &suspended);
+
+        // Only arm the suppression window on an *automatic* restore (game
+        // exited, override still Auto). An explicit "On" pick means the user
+        // asked for CEF back themselves, so Steam showing its window is the
+        // expected, wanted outcome there, not something to hide.
+        if (wasSuspended && !disabled && GetOverride() == OVERRIDE_AUTO)
+            gSuppressShowUntilTick = GetTickCount64() + 8000;
+
         HWND hWnd = hTrayWnd;
         if (hWnd)
             PostMessageW(hWnd, WM_TRAYSTATE, disabled, 0);
@@ -461,10 +629,33 @@ static VOID CALLBACK WinEventProc(HWINEVENTHOOK hWinEventHook, DWORD event, HWND
                                   DWORD dwEventThread, DWORD dwmsEventTime)
 {
     (void)hWinEventHook;
-    (void)event;
-    (void)idObject;
     (void)idChild;
     (void)dwmsEventTime;
+
+    // idObject == OBJID_WINDOW means the window itself just showed, not one
+    // of its child controls - EVENT_OBJECT_SHOW otherwise fires constantly
+    // for every button/label inside it as the page renders.
+    if (event == EVENT_OBJECT_SHOW && idObject == OBJID_WINDOW)
+    {
+        ULONGLONG deadline = gSuppressShowUntilTick;
+        if (deadline && GetTickCount64() < deadline)
+        {
+            WCHAR szClassName[64] = {0};
+            GetClassNameW(hwnd, szClassName, ARRAYSIZE(szClassName));
+            if (CompareStringOrdinal(L"vguiPopupWindow", -1, szClassName, -1, FALSE) == CSTR_EQUAL)
+            {
+                // One-shot: only the first window auto-restore pops back up is
+                // suppressed. Anything shown afterwards (including the user
+                // manually reopening Steam a second later) is left alone.
+                gSuppressShowUntilTick = 0;
+                ShowWindow(hwnd, SW_HIDE);
+            }
+        }
+        return;
+    }
+
+    if (event != EVENT_OBJECT_CREATE)
+        return;
 
     // Room to spare so a class name that merely shares a 15-char prefix with
     // "vguiPopupWindow" can't be truncated into a false match.
@@ -537,7 +728,11 @@ static DWORD WINAPI HookThreadProc(LPVOID lpParameter)
 {
     (void)lpParameter;
 
-    if (!SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_CREATE, NULL, WinEventProc, GetCurrentProcessId(), 0,
+    // Range covers CREATE (existing tray/watcher bootstrap), DESTROY (ignored
+    // - ends up in WinEventProc's default fallthrough), and SHOW (the auto-
+    // restore suppression above). EVENT_OBJECT_HIDE is one past the end of
+    // this range and is intentionally excluded - nothing here needs it.
+    if (!SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_SHOW, NULL, WinEventProc, GetCurrentProcessId(), 0,
                          WINEVENT_OUTOFCONTEXT))
         return EXIT_FAILURE;
 
