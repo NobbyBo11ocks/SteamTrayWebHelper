@@ -147,7 +147,7 @@ Aetopia's repository was archived on **10 February 2026** and is marked deprecat
 - Automatic mode that follows Steam's actual `RunningAppID` state.
 - A private override value that does not overwrite Steam's own game-running value.
 - Unique command IDs so closing the tray menu cannot silently change modes.
-- State-aware tooltips that clearly show whether CEF is enabled or disabled.
+- State-aware tooltips that clearly show whether CEF is enabled or disabled, and say so plainly (`(not applied)`) on the rare occasion Steam rejects the change, rather than reporting a mode that never took effect.
 - Automatic tray-icon recovery after Windows Explorer recreates the taskbar.
 - Native Win32 implementation with no separate runtime or background service.
 - An installer with Steam-folder validation and a built-in uninstaller.
@@ -211,7 +211,15 @@ Get-FileHash .\src\bin\umpdc.dll -Algorithm SHA256
 
 The digest should match the published `umpdc.dll.sha256` exactly. If it does, the release binary provably contains nothing that isn't in this repository.
 
-This requires the same compiler version the release was built with, since the output depends on it. The workflow logs record the toolchain used for every build.
+This requires the **same toolchain** the release was built with. `ld` stamps its own version into the PE header, so a different binutils changes the file — and its checksum — without changing a single instruction. Every release ships a `toolchain.txt` listing exactly what produced it:
+
+```text
+gcc:     gcc.exe (Rev5, Built by MSYS2 project) 16.1.0
+ld:      GNU ld (GNU Binutils) 2.46.1
+windres: GNU windres (GNU Binutils) 2.46.1
+```
+
+If your digest differs by only a byte or two, compare that file first — a binutils mismatch is the usual cause, and it is not a sign that anything is wrong with the binary.
 
 ---
 

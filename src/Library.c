@@ -224,8 +224,17 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     case WM_TRAYSTATE:
     {
         BOOL disabled = (BOOL)wParam;
+        // lParam says whether the watcher actually managed to put Steam into
+        // that state. Without it the tooltip reports the *intent* - what the
+        // override and RunningAppID say it should be - and so keeps claiming
+        // "CEF Disabled" even when the suspend was rejected and CEF is plainly
+        // still running. The icon still shows the requested mode, since that is
+        // what the menu selected; the tooltip is where the disagreement goes.
+        BOOL applied = (BOOL)lParam;
         nid.hIcon = disabled ? hIconOff : hIconOn;
         lstrcpyW(nid.szTip, disabled ? L"Steam WebHelper - CEF Disabled" : L"Steam WebHelper - CEF Enabled");
+        if (!applied)
+            lstrcatW(nid.szTip, L" (not applied)");
         Shell_NotifyIconW(NIM_MODIFY, &nid);
         break;
     }
@@ -484,20 +493,34 @@ static BOOL EnsureSteamDir(VOID)
     return TRUE;
 }
 
-static VOID KillWebHelperChildren(VOID)
+// Steam runs one steamwebhelper.exe as a direct child; a handful at most across
+// client versions. The cap only bounds the array, and anything beyond it is
+// simply left alone rather than overflowing it.
+#define MAX_WEBHELPERS 32
+
+// Opens a handle to every steamwebhelper.exe that is a direct child of this
+// process, returning how many were collected. Split out from the terminate
+// below because everything here - the toolhelp snapshot especially - allocates
+// from the process heap, and this must therefore run while Steam's UI thread is
+// still running. See the call site in WatcherThreadProc for why that matters.
+static UINT CollectWebHelperChildren(HANDLE *out, UINT max)
 {
+    UINT count = 0;
+
     if (!EnsureSteamDir())
-        return;
+        return 0;
 
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnap == INVALID_HANDLE_VALUE)
-        return;
+        return 0;
 
     DWORD selfPid = GetCurrentProcessId();
     PROCESSENTRY32W pe = {.dwSize = sizeof(PROCESSENTRY32W)};
     if (Process32FirstW(hSnap, &pe))
         do
         {
+            if (count >= max)
+                break;
             // steamwebhelper.exe is a direct child of steam.exe (this process);
             // its own CEF renderer/GPU children die with it, so terminating the
             // parent is sufficient in practice.
@@ -517,13 +540,29 @@ static VOID KillWebHelperChildren(VOID)
                         imgPathLen > gSteamDirChars &&
                         CompareStringOrdinal(imgPath, (INT)gSteamDirChars, gSteamDir, (INT)gSteamDirChars, TRUE) ==
                             CSTR_EQUAL)
-                        TerminateProcess(hProcess, EXIT_SUCCESS);
-                    CloseHandle(hProcess);
+                        out[count++] = hProcess;
+                    else
+                        CloseHandle(hProcess);
                 }
             }
         } while (Process32NextW(hSnap, &pe));
 
     CloseHandle(hSnap);
+    return count;
+}
+
+// Kills what CollectWebHelperChildren opened. Deliberately nothing but kernel
+// calls on handles that already exist: no allocation, so this half is the part
+// that is safe to run while Steam's UI thread is suspended. Always call it for
+// a successful collect, even on a path that decides not to kill - it owns the
+// handles and closing them is not optional.
+static VOID TerminateCollected(HANDLE *handles, UINT count)
+{
+    for (UINT i = 0; i < count; i++)
+    {
+        TerminateProcess(handles[i], EXIT_SUCCESS);
+        CloseHandle(handles[i]);
+    }
 }
 
 // Apply the desired CEF state to Steam's UI thread, tracking whether we have
@@ -532,14 +571,17 @@ static VOID KillWebHelperChildren(VOID)
 // row would suspend twice while a single later "enabled" event resumes only
 // once, leaving Steam's thread stuck suspended (a frozen client). We transition
 // only on a real change and drain the resume count fully as belt-and-braces.
-static VOID ApplyThreadState(HANDLE hThread, BOOL disabled, BOOL *pSuspended)
+// Returns whether the requested state is actually in effect, so the caller can
+// stop the tray reporting an override it never managed to apply.
+static BOOL ApplyThreadState(HANDLE hThread, BOOL disabled, BOOL *pSuspended)
 {
     if (disabled && !*pSuspended)
     {
         // Only record the suspension if it actually happened; SuspendThread
         // returns (DWORD)-1 on failure.
-        if (SuspendThread(hThread) != (DWORD)-1)
-            *pSuspended = TRUE;
+        if (SuspendThread(hThread) == (DWORD)-1)
+            return FALSE;
+        *pSuspended = TRUE;
     }
     else if (!disabled && *pSuspended)
     {
@@ -551,11 +593,14 @@ static VOID ApplyThreadState(HANDLE hThread, BOOL disabled, BOOL *pSuspended)
         for (;;)
         {
             DWORD prev = ResumeThread(hThread);
-            if (prev == (DWORD)-1 || prev <= 1)
+            if (prev == (DWORD)-1)
+                return FALSE;
+            if (prev <= 1)
                 break;
         }
         *pSuspended = FALSE;
     }
+    return TRUE;
 }
 
 // Runs on its own thread (not inside the WinEvent callback - see
@@ -595,19 +640,40 @@ static DWORD WINAPI WatcherThreadProc(LPVOID lpParameter)
     // that launches in the small gap between the tray window being created and
     // the notifications being armed - would otherwise not take effect until the
     // *next* change, leaving steamwebhelper.exe alive for a cycle.
+    //
+    // Collect before suspending, terminate after. Doing the whole kill after the
+    // suspend - as this did originally - takes a toolhelp snapshot while Steam's
+    // UI thread is frozen, and if that thread happened to be holding the process
+    // heap lock at the moment it stopped, the snapshot's own allocation waits on
+    // a lock that can now never be released: Steam hangs, permanently. Collecting
+    // first keeps every allocation outside the suspended window, while still
+    // terminating after the suspend so Steam cannot immediately respawn what we
+    // just killed.
     {
         BOOL disabled = ComputeDisabled();
-        ApplyThreadState(hThread, disabled, &suspended);
+        HANDLE kill[MAX_WEBHELPERS];
+        UINT killCount = disabled ? CollectWebHelperChildren(kill, MAX_WEBHELPERS) : 0;
+        BOOL applied = ApplyThreadState(hThread, disabled, &suspended);
+        TerminateCollected(kill, killCount);
         HWND hWnd = hTrayWnd;
         if (hWnd)
-            PostMessageW(hWnd, WM_TRAYSTATE, disabled, 0);
-        if (disabled)
-            KillWebHelperChildren();
+            PostMessageW(hWnd, WM_TRAYSTATE, disabled, applied);
     }
+
+    // Steam's UI thread joins the wait as a third object. A thread handle is
+    // signalled when the thread terminates, so if Steam tears its UI thread down
+    // - a client update, a UI restart - this wakes instead of sitting on a
+    // handle that every SuspendThread will now reject, which is what used to
+    // make the helper silently stop working for the rest of the session. Exiting
+    // clears gWatcherThreadStarted, so the next vguiPopupWindow that Steam
+    // creates starts a fresh watcher bound to the new thread.
+    HANDLE waits[3] = {hEvents[0], hEvents[1], hThread};
 
     for (;;)
     {
-        DWORD wait = WaitForMultipleObjects(2, hEvents, FALSE, INFINITE);
+        DWORD wait = WaitForMultipleObjects(3, waits, FALSE, INFINITE);
+        if (wait == WAIT_OBJECT_0 + 2)
+            break; // Steam's UI thread is gone; rebuild against its replacement
         if (wait != WAIT_OBJECT_0 && wait != WAIT_OBJECT_0 + 1)
             break;
 
@@ -621,7 +687,14 @@ static DWORD WINAPI WatcherThreadProc(LPVOID lpParameter)
 
         BOOL disabled = ComputeDisabled();
         BOOL wasSuspended = suspended;
-        ApplyThreadState(hThread, disabled, &suspended);
+
+        // Same collect-then-suspend-then-terminate ordering as the initial
+        // apply above; see there for why the snapshot must not happen while
+        // Steam's UI thread is frozen.
+        HANDLE kill[MAX_WEBHELPERS];
+        UINT killCount = disabled ? CollectWebHelperChildren(kill, MAX_WEBHELPERS) : 0;
+        BOOL applied = ApplyThreadState(hThread, disabled, &suspended);
+        TerminateCollected(kill, killCount);
 
         // Only arm the suppression window on an *automatic* restore (game
         // exited, override still Auto). An explicit "On" pick means the user
@@ -632,10 +705,7 @@ static DWORD WINAPI WatcherThreadProc(LPVOID lpParameter)
 
         HWND hWnd = hTrayWnd;
         if (hWnd)
-            PostMessageW(hWnd, WM_TRAYSTATE, disabled, 0);
-
-        if (disabled)
-            KillWebHelperChildren();
+            PostMessageW(hWnd, WM_TRAYSTATE, disabled, applied);
     }
 
 cleanup:
@@ -710,7 +780,10 @@ static VOID CALLBACK WinEventProc(HWINEVENTHOOK hWinEventHook, DWORD event, HWND
     if (InterlockedCompareExchange(&gWatcherThreadStarted, 1, 0) != 0)
         return;
 
-    HANDLE hSteamThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, dwEventThread);
+    // SYNCHRONIZE on top of SUSPEND_RESUME: the watcher waits on this handle
+    // alongside its registry events so it notices the thread terminating, which
+    // needs the handle to carry the right to be used in a wait function.
+    HANDLE hSteamThread = OpenThread(THREAD_SUSPEND_RESUME | SYNCHRONIZE, FALSE, dwEventThread);
     if (!hSteamThread)
     {
         InterlockedExchange(&gWatcherThreadStarted, 0);

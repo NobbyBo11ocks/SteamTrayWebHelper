@@ -144,6 +144,30 @@ jobs:
           (cd src/bin && sha256sum umpdc.dll | tee umpdc.dll.sha256)
           (cd installer/Output && sha256sum SteamTrayWebHelper.exe | tee SteamTrayWebHelper.exe.sha256)
 
+      # The build is byte-for-byte reproducible, but only against the same
+      # toolchain: ld stamps its own version into the PE header, so a different
+      # binutils changes the file (and its checksum) without changing a single
+      # instruction. Publishing the versions turns "rebuild and compare" from a
+      # claim into something someone can actually carry out, instead of hitting
+      # a two-byte mismatch with no way to know why.
+      - name: Record toolchain
+        run: |
+          # Each version goes through a command substitution rather than being
+          # piped straight into the group. The msys2 shell runs with pipefail,
+          # and `tool --version | head -1` can report the tool as failed when
+          # head closes the pipe first; inside $(...) the exit status is the
+          # echo's, so this cannot fail the build over its own formatting.
+          {
+            echo "SteamTrayWebHelper reproducible-build toolchain"
+            echo "commit:  ${{ github.sha }}"
+            echo "ref:     ${{ github.ref }}"
+            echo
+            echo "gcc:     $(gcc --version | head -1)"
+            echo "ld:      $(ld --version | head -1)"
+            echo "windres: $(windres --version | head -1)"
+            echo "python:  $(python -c 'import sys, PIL, numpy; print("Pillow", PIL.__version__, "numpy", numpy.__version__, "on", sys.version.split()[0])')"
+          } | tee toolchain.txt
+
       - uses: actions/upload-artifact@v7
         with:
           name: SteamTrayWebHelper
@@ -152,6 +176,7 @@ jobs:
             src/bin/umpdc.dll.sha256
             installer/Output/SteamTrayWebHelper.exe
             installer/Output/SteamTrayWebHelper.exe.sha256
+            toolchain.txt
           if-no-files-found: error
 
       # Signed SLSA build provenance binding each released binary's digest to
@@ -180,4 +205,5 @@ jobs:
             src/bin/umpdc.dll.sha256
             installer/Output/SteamTrayWebHelper.exe
             installer/Output/SteamTrayWebHelper.exe.sha256
+            toolchain.txt
           fail_on_unmatched_files: true
