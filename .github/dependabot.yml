@@ -1,0 +1,20 @@
+version: 2
+updates:
+  # Keeps the actions in .github/workflows current. Without this they drift
+  # silently: checkout, upload-artifact and action-gh-release had each fallen
+  # multiple major versions behind before being bumped by hand, and a pinned
+  # action only stops working long after it stopped being maintained.
+  # "/" is correct here and does not mean the repository root only - for the
+  # github-actions ecosystem Dependabot reads /.github/workflows from it.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    commit-message:
+      prefix: "ci"
+    groups:
+      # One PR for all of them rather than one each; these are updated together
+      # in practice and reviewing them together is less work.
+      actions:
+        patterns:
+          - "*"

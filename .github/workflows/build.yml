@@ -23,9 +23,16 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
-    # Needed by the Release step to create the release and upload assets.
     permissions:
+      # Create the release and upload its assets.
       contents: write
+      # The three below are what actions/attest needs on a tag build: id-token
+      # mints the OIDC token used to request a Sigstore signing certificate,
+      # attestations persists the attestation, and artifact-metadata creates the
+      # artifact storage record.
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     defaults:
       run:
         shell: msys2 {0}
@@ -101,9 +108,20 @@ jobs:
           windres res/icon.rc -O coff -o bin/icon.res
           gcc -Oz -Wall -Wextra -Werror \
               -Wl,--gc-sections,--exclude-all-symbols,--dynamicbase,--nxcompat,--high-entropy-va \
+              -Wl,--no-insert-timestamp,--image-base,0x180000000 \
               -municode -shared -nostdlib -s \
               Library.c bin/icon.res -lkernel32 -luser32 -ladvapi32 -lshell32 -lgdi32 \
               -o bin/umpdc.dll
+
+      # Advisory, deliberately not -Werror and deliberately not part of the link
+      # above. -fanalyzer is a deeper interprocedural pass than -Wall/-Wextra and
+      # its false-positive set shifts between GCC releases; with `update: true`
+      # pulling a new GCC whenever MSYS2 ships one, making it fatal would sooner
+      # or later fail a release over an analyzer regression rather than a real
+      # defect. Findings still surface as annotations on the run.
+      - name: Static analysis (advisory)
+        working-directory: src
+        run: gcc -Oz -Wall -Wextra -fanalyzer -municode -shared -nostdlib -c Library.c -o /dev/null
 
       # The installer bundles the DLL built above, so it has to run after it.
       # Inno Setup 6 is preinstalled on the windows-latest runner image; the
@@ -135,6 +153,21 @@ jobs:
             installer/Output/SteamTrayWebHelper.exe
             installer/Output/SteamTrayWebHelper.exe.sha256
           if-no-files-found: error
+
+      # Signed SLSA build provenance binding each released binary's digest to
+      # this commit and workflow run, verifiable with:
+      #   gh attestation verify umpdc.dll --repo NobbyBo11ocks/SteamTrayWebHelper
+      # Free on public repositories. Runs before Release so a failure here never
+      # leaves published assets without provenance, and only on tags - a
+      # pull_request from a fork is not granted id-token: write, so attesting
+      # every event would fail those runs for no benefit.
+      - name: Attest build provenance
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            src/bin/umpdc.dll
+            installer/Output/SteamTrayWebHelper.exe
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/')

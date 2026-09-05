@@ -191,6 +191,28 @@ Each release also carries a matching `.sha256` file (`umpdc.dll.sha256`, `SteamT
 Get-Content .\umpdc.dll.sha256
 ```
 
+### Build provenance
+
+Every released binary carries a signed [SLSA build provenance](https://slsa.dev/) attestation tying it to the exact commit and workflow run that produced it. With the [GitHub CLI](https://cli.github.com/) installed:
+
+```powershell
+gh attestation verify .\umpdc.dll --repo NobbyBo11ocks/SteamTrayWebHelper
+```
+
+That answers a stronger question than a checksum does. A digest only proves the file matches what the release page lists; the attestation proves it was built by this repository's workflow from a specific commit, and was not uploaded by hand.
+
+### Reproduce the build yourself
+
+The build is deterministic: rebuilding the same commit with the same toolchain produces a **byte-identical** `umpdc.dll`, and therefore a byte-identical `SteamTrayWebHelper.exe` as well, since the installer just bundles that DLL. Check out the tag matching the release, follow [Building from source](#building-from-source), and compare:
+
+```powershell
+Get-FileHash .\src\bin\umpdc.dll -Algorithm SHA256
+```
+
+The digest should match the published `umpdc.dll.sha256` exactly. If it does, the release binary provably contains nothing that isn't in this repository.
+
+This requires the same compiler version the release was built with, since the output depends on it. The workflow logs record the toolchain used for every build.
+
 ---
 
 ## Troubleshooting
@@ -255,11 +277,14 @@ mkdir -p bin
 windres res/icon.rc -O coff -o bin/icon.res
 gcc -Oz -Wall -Wextra -Werror \
   -Wl,--gc-sections,--exclude-all-symbols,--dynamicbase,--nxcompat,--high-entropy-va \
+  -Wl,--no-insert-timestamp,--image-base,0x180000000 \
   -municode -shared -nostdlib -s \
   Library.c bin/icon.res \
   -lkernel32 -luser32 -ladvapi32 -lshell32 -lgdi32 \
   -o bin/umpdc.dll
 ```
+
+The last two linker flags make the build **reproducible**: without them the DLL embeds a link timestamp and MinGW picks a fresh image base on every link, so two builds of identical source never match. Pinning the image base does not weaken ASLR — `--dynamicbase` is still set, so Windows still randomises the real load address; only the preferred base recorded in the file is fixed.
 
 The generated DLL will be located at:
 
