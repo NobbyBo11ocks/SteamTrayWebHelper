@@ -117,6 +117,24 @@ The active mode is marked with a checkmark in the tray menu.
 
 **Hotkey:** press <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>L</kbd> anywhere to flip CEF between forced **On** and forced **Off** - the same override the tray menu writes, so it's reflected in the menu's checkmark immediately. If another application has already claimed that combination, the hotkey silently has no effect; the tray menu still works normally.
 
+<details>
+<summary><strong>Remapping the hotkey</strong></summary>
+
+<br>
+
+Set two values under `HKCU\SOFTWARE\NoSteamWebHelper` and the change takes effect immediately - no Steam restart:
+
+| Value | Type | Meaning |
+|---|---|---|
+| `Hotkey` | `DWORD` | [Virtual-key code](https://learn.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes) of the key, e.g. `0x4C` for `L`, `0x77` for `F8` |
+| `HotkeyModifiers` | `DWORD` | Sum of `1` Alt, `2` Ctrl, `4` Shift, `8` Win |
+
+For <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>F8</kbd>, set `Hotkey` to `0x77` and `HotkeyModifiers` to `6` (`2` + `4`).
+
+At least one modifier is required, so a stray value can't bind a bare keypress system-wide. Anything missing or unusable falls back to <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>L</kbd>, and key auto-repeat never fires the toggle more than once per press.
+
+</details>
+
 ---
 
 ## Why this version is a major improvement
@@ -348,6 +366,7 @@ SteamTrayWebHelper/
 │       ├── icon_off.ico
 │       ├── make_icon.py
 │       └── steam_logo_source.png
+├── CHANGELOG.md
 ├── LICENSE
 └── README.md
 ```

@@ -18,6 +18,15 @@
 #define IDH_TOGGLE 1 // global hotkey id: Ctrl+Alt+L flips the forced On/Off override
 
 #define WM_TRAYSTATE (WM_APP + 1)
+#define WM_REHOTKEY (WM_APP + 2) // override key changed; re-read the hotkey binding
+
+// Optional overrides for the toggle hotkey, stored beside the mode override.
+// Absent or unusable values fall back to Ctrl+Alt+L, so a bad edit costs the
+// custom binding rather than the hotkey itself.
+#define HOTKEY_VALUE_MODS L"HotkeyModifiers"
+#define HOTKEY_VALUE_VK L"Hotkey"
+#define HOTKEY_DEFAULT_MODS (MOD_CONTROL | MOD_ALT)
+#define HOTKEY_DEFAULT_VK 'L'
 
 // A private key for the manual tray override, kept separate from Steam's own
 // HKCU\SOFTWARE\Valve\Steam\RunningAppID. Writing directly into Steam's key
@@ -98,6 +107,10 @@ static BOOL ComputeDisabled(VOID)
 // would leak one GDI handle per toggle over a multi-day Steam session.
 static HICON hIconOn, hIconOff;
 
+// The metrics the cached icons were rasterised for, so a settings change can
+// tell an actual DPI move from the many unrelated WM_SETTINGCHANGEs.
+static int gIconCx, gIconCy;
+
 static VOID EnsureTrayIconsLoaded(VOID)
 {
     if (hIconOn)
@@ -105,6 +118,8 @@ static VOID EnsureTrayIconsLoaded(VOID)
     int cx = GetSystemMetrics(SM_CXSMICON), cy = GetSystemMetrics(SM_CYSMICON);
     hIconOn = LoadImageW(hModule, MAKEINTRESOURCEW(IDR_ICON_ON), IMAGE_ICON, cx, cy, LR_DEFAULTCOLOR);
     hIconOff = LoadImageW(hModule, MAKEINTRESOURCEW(IDR_ICON_OFF), IMAGE_ICON, cx, cy, LR_DEFAULTCOLOR);
+    gIconCx = cx;
+    gIconCy = cy;
 }
 
 // ---- Dark owner-drawn tray menu --------------------------------------------
@@ -191,6 +206,63 @@ static VOID EnsureMenuFonts(VOID)
                                  L"Marlett");
 }
 
+// Binds the toggle hotkey from the registry, or Ctrl+Alt+L when nothing usable
+// is stored. Safe to call repeatedly: RegisterHotKey does NOT replace an
+// existing binding on the same window and id - both would stay live - so the
+// old one is explicitly removed first.
+static VOID RegisterToggleHotkey(HWND hWnd)
+{
+    DWORD mods = HOTKEY_DEFAULT_MODS, vk = HOTKEY_DEFAULT_VK;
+    RegGetValueW(HKEY_CURRENT_USER, OVERRIDE_SUBKEY, HOTKEY_VALUE_MODS, RRF_RT_REG_DWORD, NULL, &mods,
+                 &((DWORD){sizeof(DWORD)}));
+    RegGetValueW(HKEY_CURRENT_USER, OVERRIDE_SUBKEY, HOTKEY_VALUE_VK, RRF_RT_REG_DWORD, NULL, &vk,
+                 &((DWORD){sizeof(DWORD)}));
+
+    // Drop anything that isn't a real modifier bit, and require at least one
+    // plus a plausible virtual-key code. A combination with no modifier would
+    // swallow a bare keypress system-wide, which is not something a stray
+    // registry value should be able to do.
+    mods &= MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN;
+    if (!mods || vk == 0 || vk > 0xFF)
+    {
+        mods = HOTKEY_DEFAULT_MODS;
+        vk = HOTKEY_DEFAULT_VK;
+    }
+
+    UnregisterHotKey(hWnd, IDH_TOGGLE);
+    // MOD_NOREPEAT is forced on regardless of the stored value: holding the
+    // combination down should not flood WM_HOTKEY and flip the override
+    // repeatedly. Failure (another app owns the combination) is ignored, same
+    // as the rest of this file's non-critical setup - the menu still works.
+    RegisterHotKey(hWnd, IDH_TOGGLE, mods | MOD_NOREPEAT, vk);
+}
+
+// Drops the cached icons and fonts so the next Ensure* call rebuilds them at
+// the current metrics.
+static VOID InvalidateTrayVisuals(VOID)
+{
+    if (hIconOn)
+    {
+        DestroyIcon(hIconOn);
+        hIconOn = NULL;
+    }
+    if (hIconOff)
+    {
+        DestroyIcon(hIconOff);
+        hIconOff = NULL;
+    }
+    if (hMenuFont)
+    {
+        DeleteObject(hMenuFont);
+        hMenuFont = NULL;
+    }
+    if (hMenuCheckFont)
+    {
+        DeleteObject(hMenuCheckFont);
+        hMenuCheckFont = NULL;
+    }
+}
+
 static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     static NOTIFYICONDATAW nid = {.cbSize = sizeof(NOTIFYICONDATAW),
@@ -198,6 +270,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                                   .uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP};
 
     static UINT msgTaskbarCreated = WM_NULL;
+
+    // Last state pushed to the tray, so a rebuild after a DPI change can put
+    // the correct icon straight back without waiting for the next state change.
+    static BOOL trayDisabled;
 
     switch (uMsg)
     {
@@ -209,15 +285,12 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         EnsureTrayIconsLoaded();
 
         BOOL disabled = ComputeDisabled();
+        trayDisabled = disabled;
         nid.hIcon = disabled ? hIconOff : hIconOn;
         lstrcpyW(nid.szTip, disabled ? L"Steam WebHelper - CEF Disabled" : L"Steam WebHelper - CEF Enabled");
         Shell_NotifyIconW(NIM_ADD, &nid);
 
-        // MOD_NOREPEAT (Win7+) so holding the combo down doesn't flood WM_HOTKEY
-        // and rapidly flip the override back and forth. Failure (e.g. another
-        // app already owns Ctrl+Alt+L) is silently ignored, same as the rest of
-        // this file's non-critical setup calls - the menu is still there.
-        RegisterHotKey(hWnd, IDH_TOGGLE, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'L');
+        RegisterToggleHotkey(hWnd);
         break;
     }
 
@@ -231,6 +304,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         // still running. The icon still shows the requested mode, since that is
         // what the menu selected; the tooltip is where the disagreement goes.
         BOOL applied = (BOOL)lParam;
+        trayDisabled = disabled;
         nid.hIcon = disabled ? hIconOff : hIconOn;
         lstrcpyW(nid.szTip, disabled ? L"Steam WebHelper - CEF Disabled" : L"Steam WebHelper - CEF Enabled");
         if (!applied)
@@ -238,6 +312,30 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         Shell_NotifyIconW(NIM_MODIFY, &nid);
         break;
     }
+
+    case WM_REHOTKEY:
+        // The override key changed, which is also where the hotkey binding
+        // lives, so re-read it. Cheap enough to do unconditionally rather than
+        // diffing the values, and it means a remap takes effect immediately
+        // instead of at the next Steam restart.
+        RegisterToggleHotkey(hWnd);
+        break;
+
+    case WM_SETTINGCHANGE:
+        // Icons are rasterised once at SM_CXSMICON and the menu font is read
+        // once from SPI_GETNONCLIENTMETRICS, so changing display scaling left a
+        // blurred, wrongly sized tray icon until Steam restarted. WM_SETTINGCHANGE
+        // fires for every system-wide setting, most of them irrelevant, so this
+        // reacts to the metric that actually matters rather than guessing which
+        // SPI_ codes to filter on - a no-op unless the icon size really moved.
+        if (GetSystemMetrics(SM_CXSMICON) != gIconCx || GetSystemMetrics(SM_CYSMICON) != gIconCy)
+        {
+            InvalidateTrayVisuals();
+            EnsureTrayIconsLoaded();
+            nid.hIcon = trayDisabled ? hIconOff : hIconOn;
+            Shell_NotifyIconW(NIM_MODIFY, &nid);
+        }
+        break;
 
     case WM_HOTKEY:
         // Ctrl+Alt+L: flip the forced override rather than just toggling CEF
@@ -421,18 +519,11 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         Shell_NotifyIconW(NIM_DELETE, &nid);
         UnregisterHotKey(hWnd, IDH_TOGGLE);
         hTrayWnd = NULL;
-        // Release the cached menu fonts. DEFAULT_GUI_FONT is a stock object and
-        // DeleteObject is a harmless no-op on it, so the fallback path is safe.
-        if (hMenuFont)
-        {
-            DeleteObject(hMenuFont);
-            hMenuFont = NULL;
-        }
-        if (hMenuCheckFont)
-        {
-            DeleteObject(hMenuCheckFont);
-            hMenuCheckFont = NULL;
-        }
+        // Release the cached icons and menu fonts. DEFAULT_GUI_FONT is a stock
+        // object and DeleteObject is a harmless no-op on it, so the font
+        // fallback path is safe; the icons come from LoadImage without
+        // LR_SHARED, so they are ours to destroy.
+        InvalidateTrayVisuals();
         PostQuitMessage(0);
         break;
 
@@ -705,7 +796,15 @@ static DWORD WINAPI WatcherThreadProc(LPVOID lpParameter)
 
         HWND hWnd = hTrayWnd;
         if (hWnd)
+        {
             PostMessageW(hWnd, WM_TRAYSTATE, disabled, applied);
+            // The hotkey binding lives under the same key as the mode override,
+            // so a change to it arrives on this event too. Re-reading only when
+            // that key fired keeps a Steam RunningAppID change from pointlessly
+            // re-registering the hotkey on every game launch and exit.
+            if (wait == WAIT_OBJECT_0 + 1)
+                PostMessageW(hWnd, WM_REHOTKEY, 0, 0);
+        }
     }
 
 cleanup:
