@@ -13,11 +13,12 @@ A lightweight native Windows utility that disables Steam's Chromium-based WebHel
 [![Language](https://img.shields.io/badge/Native-C-00599C?logo=c&logoColor=white)](#building-from-source)
 [![Theme](https://img.shields.io/badge/Theme-Steam-1b2838?logo=steam&logoColor=66c0f4)](#tray-icons-and-controls)
 [![License](https://img.shields.io/badge/License-GPL--3.0-66c0f4.svg)](LICENSE)
+[![Build](https://github.com/NobbyBo11ocks/SteamTrayWebHelper/actions/workflows/build.yml/badge.svg)](https://github.com/NobbyBo11ocks/SteamTrayWebHelper/actions/workflows/build.yml)
 
 <br>
 
-<a href="https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases/latest/download/Setup.exe">
-  <img src="https://img.shields.io/badge/Download-Setup.exe-2ea44f?style=for-the-badge&logo=windows&logoColor=white" alt="Download Setup.exe">
+<a href="https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases/latest/download/SteamTrayWebHelper.exe">
+  <img src="https://img.shields.io/badge/Download-SteamTrayWebHelper.exe-2ea44f?style=for-the-badge&logo=windows&logoColor=white" alt="Download SteamTrayWebHelper.exe">
 </a>
 &nbsp;
 <a href="https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases/latest/download/umpdc.dll">
@@ -55,12 +56,12 @@ Both installation methods are provided as separate files on the [Releases page](
 
 | Download | Recommended for | Description |
 |---|---|---|
-| [`Setup.exe`](https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases/latest/download/Setup.exe) | Most users | Detects the Steam directory, closes Steam when required, installs `umpdc.dll`, and provides an uninstaller. |
+| [`SteamTrayWebHelper.exe`](https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases/latest/download/SteamTrayWebHelper.exe) | Most users | Detects the Steam directory, closes Steam when required, installs `umpdc.dll`, and provides an uninstaller. |
 | [`umpdc.dll`](https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases/latest/download/umpdc.dll) | Advanced or portable use | Manual installation with one file placed beside `steam.exe`. |
 
 ### Installer — recommended
 
-1. Download [`Setup.exe`](https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases/latest/download/Setup.exe).
+1. Download [`SteamTrayWebHelper.exe`](https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases/latest/download/SteamTrayWebHelper.exe).
 2. Run the installer as administrator.
 3. Confirm the folder containing `steam.exe`.
 4. Complete installation and start Steam normally.
@@ -127,7 +128,7 @@ Aetopia's repository was archived on **10 February 2026** and is marked deprecat
 | Area | Aetopia's version | SteamTrayWebHelper |
 |---|---|---|
 | Project status | Archived and deprecated | Maintained continuation |
-| Installation | Manual DLL installation | Separate `Setup.exe` and `umpdc.dll` downloads |
+| Installation | Manual DLL installation | Separate `SteamTrayWebHelper.exe` installer and `umpdc.dll` downloads |
 | Tray appearance | Generic Windows application icon | Steam's own icon glyph, extracted from `steam.exe` and recoloured by state |
 | Tray menu styling | Standard popup menu | Owner-drawn menu using Steam's real palette, gradient, and rounded corners |
 | Tray menu options | Basic **On** and **Off** choices | **Automatic**, **On**, and **Off**, with active-state checkmark |
@@ -179,10 +180,16 @@ Get-FileHash .\umpdc.dll -Algorithm SHA256
 For the installer:
 
 ```powershell
-Get-FileHash .\Setup.exe -Algorithm SHA256
+Get-FileHash .\SteamTrayWebHelper.exe -Algorithm SHA256
 ```
 
 Compare the result with the SHA-256 value shown for the matching file on the [latest release page](https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases/latest).
+
+Each release also carries a matching `.sha256` file (`umpdc.dll.sha256`, `SteamTrayWebHelper.exe.sha256`), written by the build workflow on the runner that produced the binary. Download it next to the file and check both at once:
+
+```powershell
+Get-Content .\umpdc.dll.sha256
+```
 
 ---
 
@@ -208,8 +215,6 @@ Adding `-silent` to a Steam shortcut additionally stops the main window from ope
 ```text
 "C:\Program Files (x86)\Steam\Steam.exe"  -silent
 ```
-
-"C:\Program Files (x86)\Steam\Steam.exe"  -silent
 
 ### Antivirus warning
 
@@ -282,6 +287,8 @@ Requires [Inno Setup 6](https://jrsoftware.org/isinfo.php). With `src/bin/umpdc.
 iscc installer\NoSteamWebHelper.iss
 ```
 
+The installer is written to `installer\Output\SteamTrayWebHelper.exe`. It bundles whichever `src\bin\umpdc.dll` is on disk at that moment, so build the DLL first.
+
 ---
 
 ## Project structure
@@ -334,6 +341,6 @@ Distributed under the [GNU General Public License v3.0](LICENSE).
 
 ### Reduce unnecessary Steam background activity. Keep control one click away.
 
-[**Download Setup.exe**](https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases/latest/download/Setup.exe) · [**Download umpdc.dll**](https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases/latest/download/umpdc.dll) · [**View releases**](https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases)
+[**Download SteamTrayWebHelper.exe**](https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases/latest/download/SteamTrayWebHelper.exe) · [**Download umpdc.dll**](https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases/latest/download/umpdc.dll) · [**View releases**](https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases)
 
 </div>

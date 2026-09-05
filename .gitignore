@@ -482,3 +482,10 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+# Inno Setup build output (installer/Output/SteamTrayWebHelper.exe).
+# src/bin/ is already covered by the [Bb]in/ rule above.
+installer/Output/
+
+# Scratch dir used by the workflow's icon check; only survives a failed run.
+src/res/_iconcheck/

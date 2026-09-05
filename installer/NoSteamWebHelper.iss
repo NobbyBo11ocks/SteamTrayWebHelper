@@ -12,7 +12,7 @@
 ; ============================================================================
 
 #define MyAppName "NoSteamWebHelper"
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "1.2.1"
 #define MyAppPublisher "NoSteamWebHelper"
 #define MyAppURL "https://github.com/NobbyBo11ocks/SteamTrayWebHelper"
 #define DllSource "..\src\bin\umpdc.dll"
@@ -38,6 +38,15 @@ DisableProgramGroupPage=yes
 ; Writing into Program Files\Steam and replacing a DLL needs elevation.
 PrivilegesRequired=admin
 
+; Acknowledges the admin-mode-plus-HKCU pairing in [Registry] rather than
+; leaving a warning on every build. The pairing is deliberate: the override key
+; is per-user by nature (the DLL writes it as whoever is running Steam), and on
+; the normal single-account PC this targets, elevating does not change which
+; user's hive HKCU resolves to. The one case it cannot serve is a standard user
+; who elevates Setup with a separate administrator account; there the key is
+; simply left in place at uninstall, which is inert and costs one empty DWORD.
+UsedUserAreasWarning=no
+
 LicenseFile=..\LICENSE
 SetupIconFile=..\src\res\icon_on.ico
 UninstallDisplayIcon={app}\umpdc.dll
@@ -50,7 +59,9 @@ WizardImageFile=wizard_banner.bmp
 WizardSmallImageFile=wizard_small.bmp
 
 OutputDir=Output
-OutputBaseFilename=Setup
+; Must stay in sync with README.md's download links and the CI release
+; step, which both address this asset by name.
+OutputBaseFilename=SteamTrayWebHelper
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -72,13 +83,24 @@ Source: "{#DllSource}"; DestDir: "{app}"; DestName: "umpdc.dll"; \
     Flags: ignoreversion overwritereadonly
 
 [Registry]
-; The DLL stores the tray override under this key. uninsdeletekey wipes it on
-; uninstall so nothing is left behind.
-Root: HKCU; Subkey: "SOFTWARE\NoSteamWebHelper"; Flags: uninsdeletekey
+; The DLL stores the tray override under this key. It is created by the DLL at
+; runtime, from inside steam.exe - so dontcreatekey: Setup has no reason to make
+; it ahead of time, and creating it here would be actively wrong when Setup was
+; elevated with a *different* account's credentials, since Setup's own HKCU is
+; then that administrator's hive rather than the Steam user's. uninsdeletekey
+; still removes it on uninstall, which is right in the normal case where the
+; person running Setup is the person who uses Steam. See UsedUserAreasWarning
+; in [Setup] for the acknowledged limit of that.
+Root: HKCU; Subkey: "SOFTWARE\NoSteamWebHelper"; Flags: dontcreatekey uninsdeletekey
 
 [Run]
+; runasoriginaluser matters here: Setup itself runs elevated (PrivilegesRequired=
+; admin), and without this flag Steam would inherit that elevated token. An
+; elevated Steam launches every game elevated too and loses drag-and-drop from
+; Explorer - the state Valve's own client warns about. This hands the launch
+; back to the logged-on user instead.
 Filename: "{app}\steam.exe"; Description: "Launch Steam now"; \
-    Flags: postinstall nowait skipifsilent unchecked
+    Flags: postinstall nowait skipifsilent unchecked runasoriginaluser
 
 [Code]
 { ---- Dark title bar (Windows 10 2004+) ----------------------------------- }

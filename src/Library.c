@@ -146,6 +146,12 @@ static const DARKMENUITEM kMiOff = {L"Off", FALSE};
 static HFONT hMenuFont;      // the system menu font (SPI_GETNONCLIENTMETRICS)
 static HFONT hMenuCheckFont; // Marlett, for the check glyph ('a')
 
+// The popup size the rounded region was last cut for, or 0x0 for "not shaped
+// yet". Reset before each TrackPopupMenu and updated by the WM_ENTERIDLE
+// handler - see there for why this is tracked rather than applied every time.
+// Touched only by the tray thread.
+static LONG gMenuShapedW, gMenuShapedH;
+
 // Steam's Menu.render_bg is a real per-pixel gradient over the popup's first
 // MENU_GRADIENT_SPAN px, flat fill below that. WM_DRAWITEM only hands us one
 // item's rect at a time, not the whole popup, but DRAWITEMSTRUCT.rcItem is
@@ -257,6 +263,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
             POINT pt = {0};
             GetCursorPos(&pt);
+            gMenuShapedW = gMenuShapedH = 0; // re-arm the rounding in WM_ENTERIDLE
             UINT cmd = TrackPopupMenu(hMenu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_LEFTBUTTON | TPM_RETURNCMD, pt.x,
                                       pt.y, 0, hWnd, NULL);
             DestroyMenu(hMenu);
@@ -287,16 +294,33 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         // menu happens to be open on the desktop at this exact instant,
         // FindWindow could round the wrong one, but this only runs for the
         // few hundred ms the tray menu itself is open.
+        //
+        // Cut once per popup rather than on every idle. SetWindowRgn's
+        // bRedraw=TRUE invalidates the menu, and the repaint that follows drops
+        // the modal loop straight back to idle, sending another WM_ENTERIDLE
+        // here - so re-regioning unconditionally spins a paint/idle cycle for
+        // as long as the menu stays open. Keying off the size the region was
+        // last cut for (zeroed before each TrackPopupMenu) settles after one
+        // pass, while still re-cutting if the popup ever reports a different
+        // size later - so a region can't end up stale against its window.
         if (wParam == MSGF_MENU)
         {
             HWND hMenuWnd = FindWindowW(L"#32768", NULL);
             RECT rc;
             if (hMenuWnd && GetWindowRect(hMenuWnd, &rc))
             {
-                HRGN hRgn =
-                    CreateRoundRectRgn(0, 0, rc.right - rc.left, rc.bottom - rc.top, MENU_CORNER_RADIUS, MENU_CORNER_RADIUS);
-                if (hRgn && !SetWindowRgn(hMenuWnd, hRgn, TRUE))
-                    DeleteObject(hRgn); // ownership only transfers to the window on success
+                LONG w = rc.right - rc.left, h = rc.bottom - rc.top;
+                if (w != gMenuShapedW || h != gMenuShapedH)
+                {
+                    HRGN hRgn = CreateRoundRectRgn(0, 0, w, h, MENU_CORNER_RADIUS, MENU_CORNER_RADIUS);
+                    if (hRgn && SetWindowRgn(hMenuWnd, hRgn, TRUE))
+                    {
+                        gMenuShapedW = w;
+                        gMenuShapedH = h;
+                    }
+                    else if (hRgn)
+                        DeleteObject(hRgn); // ownership only transfers to the window on success
+                }
             }
         }
         break;
@@ -406,7 +430,11 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     default:
         // Explorer restarted (crash, or user killed it): the notification area
         // is brand new and our icon is gone, so re-add it with current state.
-        if (uMsg == msgTaskbarCreated)
+        // The nonzero test matters: msgTaskbarCreated is WM_NULL (0) until
+        // WM_CREATE runs, and stays 0 if RegisterWindowMessageW ever fails, so
+        // without it every WM_NULL - including the one the tray menu posts to
+        // itself after TrackPopupMenu - would land here instead.
+        if (msgTaskbarCreated && uMsg == msgTaskbarCreated)
             Shell_NotifyIconW(NIM_ADD, &nid);
         break;
     }
@@ -446,9 +474,13 @@ static BOOL EnsureSteamDir(VOID)
 
     // Manual copy, not CopyMemory: RtlCopyMemory expands to a genuine memcpy
     // call on MinGW headers, and no CRT is linked in (-nostdlib).
-    gSteamDirChars = lastSlash + 1; // keep the trailing backslash for prefix matching
-    for (DWORD i = 0; i < gSteamDirChars; i++)
+    DWORD chars = lastSlash + 1; // keep the trailing backslash for prefix matching
+    for (DWORD i = 0; i < chars; i++)
         gSteamDir[i] = path[i];
+    // Published last, and only once the buffer above is fully written:
+    // gSteamDirChars is what every reader tests before touching gSteamDir, so
+    // setting it first would briefly advertise a directory that isn't there yet.
+    gSteamDirChars = chars;
     return TRUE;
 }
 
@@ -706,19 +738,31 @@ static DWORD WINAPI TrayThreadProc(LPVOID lpParameter)
 
     WNDCLASSW wc = {.lpszClassName = L"NoSteamWebHelperTray", .hInstance = hModule, .lpfnWndProc = WndProc};
     ATOM atom = RegisterClassW(&wc);
-    if (!atom)
-        return EXIT_FAILURE;
-    if (!CreateWindowExW(WS_EX_LEFT | WS_EX_LTRREADING, (LPCWSTR)(ULONG_PTR)atom, NULL, WS_OVERLAPPED, 0, 0, 0, 0,
-                         NULL, NULL, hModule, NULL))
-        return EXIT_FAILURE;
+    // A previous attempt that got as far as registering the class but failed to
+    // create its window leaves the class behind, so a retry lands on
+    // ERROR_CLASS_ALREADY_EXISTS. That's the one failure worth continuing
+    // through - the class is registered, which is all CreateWindowExW needs.
+    BOOL ok = atom || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
 
-    MSG msg = {0};
-    while (GetMessageW(&msg, NULL, 0, 0))
+    if (ok && CreateWindowExW(WS_EX_LEFT | WS_EX_LTRREADING, wc.lpszClassName, NULL, WS_OVERLAPPED, 0, 0, 0, 0, NULL,
+                              NULL, hModule, NULL))
     {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+        MSG msg = {0};
+        while (GetMessageW(&msg, NULL, 0, 0))
+        {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
     }
-    return EXIT_SUCCESS;
+    else
+        ok = FALSE;
+
+    // Released whichever way we got here, so a later vguiPopupWindow event can
+    // bring the tray back - the same way the watcher thread re-arms itself.
+    // Without this, one early failure would latch the flag at 1 and leave the
+    // Steam session with no tray icon and no way to ever get one back.
+    InterlockedExchange(&gTrayThreadStarted, 0);
+    return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
 // Installs the WinEvent hook and pumps messages for it. SetWinEventHook with

@@ -1,2 +1,14 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# The generated icons are compared byte-for-byte against make_icon.py's output
+# in CI, and the wizard bitmaps are read back by Inno Setup, so nothing here can
+# survive line-ending translation. `text=auto` would almost certainly classify
+# these as binary on its own; saying so explicitly means a checkout can never
+# get it wrong on a differently configured machine.
+*.ico binary
+*.bmp binary
+*.png binary
+*.dll binary
+*.exe binary
+*.res binary

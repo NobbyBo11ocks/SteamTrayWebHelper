@@ -2,19 +2,35 @@ name: Build
 
 on:
   push:
+    # Releases are cut from tags. Both shapes are accepted because the repo's
+    # own history uses the bare form ("1.0.0", "1.2.0") while the badges and
+    # docs elsewhere use a "v" prefix - matching only one of them would leave
+    # real tags silently building without ever publishing a release.
     branches: [main]
-    tags: ["v*"]
+    tags: ["v*", "[0-9]+.[0-9]+.[0-9]+*"]
   pull_request:
   workflow_dispatch:
+
+# Superseded pushes to the same branch don't need to finish; tag builds are
+# never cancelled, since those are the ones that publish a release.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: windows-latest
+    # Needed by the Release step to create the release and upload assets.
+    permissions:
+      contents: write
     defaults:
       run:
         shell: msys2 {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: msys2/setup-msys2@v2
         with:
@@ -28,11 +44,55 @@ jobs:
       - name: Verify generated icons are up to date
         working-directory: src/res
         run: |
-          python make_icon.py
-          git diff --exit-code -- icon_on.ico icon_off.ico || {
-            echo "::error::icon_on.ico/icon_off.ico don't match make_icon.py's output - rerun it (from src/res) and commit the result.";
-            exit 1;
-          }
+          python -c "import PIL, numpy; print('Pillow', PIL.__version__, '| numpy', numpy.__version__)"
+
+          # Compared by decoded pixels, NOT by file bytes. Two Pillow builds of
+          # the very same version emit different bytes for identical images -
+          # they link different zlib/libimagequant, so the deflate stream inside
+          # each ICO frame differs. Verified: MSYS2's Pillow 12.3.0 and the
+          # windows CPython wheel's Pillow 12.3.0 produce icons that are
+          # pixel-identical at all 9 sizes yet share no SHA-256. A byte compare
+          # therefore fails permanently for anyone whose Pillow build isn't the
+          # one the committed icons happened to be generated on, which says
+          # nothing about whether the icons are actually stale.
+          #
+          # Regenerated into a scratch dir rather than over the checked-out
+          # files, so the DLL below always embeds exactly what is committed.
+          rm -rf _iconcheck && mkdir _iconcheck
+          cp make_icon.py steam_logo_source.png _iconcheck/
+          (cd _iconcheck && python make_icon.py)
+
+          # A relative path on purpose: MSYS2's python is a native Windows
+          # binary and cannot resolve MSYS paths like /tmp/....
+          python - <<'PY'
+          import sys
+
+          import numpy as np
+          from PIL.IcoImagePlugin import IcoFile
+
+          problems = []
+          for name in ("icon_on.ico", "icon_off.ico"):
+              with open(name, "rb") as fa, open("_iconcheck/" + name, "rb") as fb:
+                  a, b = IcoFile(fa), IcoFile(fb)
+                  sa, sb = sorted(a.sizes()), sorted(b.sizes())
+                  if sa != sb:
+                      problems.append("%s: sizes %s != %s" % (name, sa, sb))
+                      continue
+                  for s in sa:
+                      pa = np.array(a.getimage(s).convert("RGBA"))
+                      pb = np.array(b.getimage(s).convert("RGBA"))
+                      if pa.shape != pb.shape or not np.array_equal(pa, pb):
+                          problems.append("%s @ %dx%d" % (name, s[0], s[1]))
+
+          if problems:
+              print("::error::Committed icons do not match make_icon.py's output (%s)."
+                    " Rerun make_icon.py from src/res and commit the result." % "; ".join(problems))
+              sys.exit(1)
+
+          print("icons match make_icon.py output: pixel-identical at every size")
+          PY
+
+          rm -rf _iconcheck
 
       - name: Build
         working-directory: src
@@ -45,21 +105,46 @@ jobs:
               Library.c bin/icon.res -lkernel32 -luser32 -ladvapi32 -lshell32 -lgdi32 \
               -o bin/umpdc.dll
 
-      - name: Checksum
-        working-directory: src/bin
-        run: sha256sum umpdc.dll | tee umpdc.dll.sha256
+      # The installer bundles the DLL built above, so it has to run after it.
+      # Inno Setup 6 is preinstalled on the windows-latest runner image; the
+      # PATH lookup is tried first so this keeps working if the image ever
+      # stops shipping it at the default location.
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          if (-not (Test-Path $iscc)) { throw "Inno Setup (ISCC.exe) not found on this runner." }
+          & $iscc installer\NoSteamWebHelper.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
 
-      - uses: actions/upload-artifact@v4
+      - name: Checksums
+        run: |
+          # Hashed from inside each directory so the digest file names the bare
+          # file, which is what makes `sha256sum -c` work in the folder someone
+          # downloaded the release assets into.
+          (cd src/bin && sha256sum umpdc.dll | tee umpdc.dll.sha256)
+          (cd installer/Output && sha256sum SteamTrayWebHelper.exe | tee SteamTrayWebHelper.exe.sha256)
+
+      - uses: actions/upload-artifact@v7
         with:
-          name: umpdc
+          name: SteamTrayWebHelper
           path: |
             src/bin/umpdc.dll
             src/bin/umpdc.dll.sha256
+            installer/Output/SteamTrayWebHelper.exe
+            installer/Output/SteamTrayWebHelper.exe.sha256
+          if-no-files-found: error
 
       - name: Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
         with:
+          # Asset names are what README.md's download buttons link to via
+          # /releases/latest/download/<name> - renaming either breaks those.
           files: |
             src/bin/umpdc.dll
             src/bin/umpdc.dll.sha256
+            installer/Output/SteamTrayWebHelper.exe
+            installer/Output/SteamTrayWebHelper.exe.sha256
+          fail_on_unmatched_files: true
