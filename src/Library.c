@@ -185,16 +185,15 @@ static VOID EnsureMenuFonts(VOID)
         return;
 
     NONCLIENTMETRICSW ncm = {.cbSize = sizeof(NONCLIENTMETRICSW)};
-    if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(NONCLIENTMETRICSW), &ncm, 0))
+    BOOL haveMetrics = SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(NONCLIENTMETRICSW), &ncm, 0);
+    if (haveMetrics)
         hMenuFont = CreateFontIndirectW(&ncm.lfMenuFont);
     if (!hMenuFont)
         hMenuFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
 
     // Marlett's 'a' is the standard menu checkmark; size it to the menu font.
-    LONG h = (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(NONCLIENTMETRICSW), &ncm, 0) &&
-              ncm.lfMenuFont.lfHeight)
-                 ? ncm.lfMenuFont.lfHeight
-                 : -12;
+    // Reuses the metrics already read above rather than querying them again.
+    LONG h = (haveMetrics && ncm.lfMenuFont.lfHeight) ? ncm.lfMenuFont.lfHeight : -12;
     hMenuCheckFont = CreateFontW(h, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                                  OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH,
                                  L"Marlett");
@@ -1200,6 +1199,16 @@ static DWORD WINAPI HookThreadProc(LPVOID lpParameter)
     if (!SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, NULL, WinEventProc, GetCurrentProcessId(), 0,
                          WINEVENT_OUTOFCONTEXT))
         return EXIT_FAILURE;
+
+    // Populate gSteamDir once, here, before the message loop that starts the
+    // tray and watcher threads (from WinEventProc). Both of those threads read
+    // it - the watcher in CollectWebHelperChildren, the tray in
+    // IsSteamWebHelper - and EnsureSteamDir writes the shared buffer lazily on
+    // first use. Doing it here means the write happens before either thread
+    // exists, so the two can never write it concurrently. The callers keep
+    // their own EnsureSteamDir call as a harmless no-op (and a fallback for the
+    // near-impossible case where GetModuleFileNameW fails this early).
+    EnsureSteamDir();
 
     MSG msg = {0};
     while (GetMessageW(&msg, NULL, 0, 0))
