@@ -18,6 +18,13 @@ so keep the heading exactly `## <version>`.
   instead: still only for about 8 seconds after an automatic restore, and
   still only the first window, so reopening Steam from its tray icon works as
   before.
+- The watcher no longer takes a process snapshot while Steam's UI thread is
+  suspended. 1.2.3 moved the snapshot out of that window because it allocates
+  from the process heap and could freeze Steam for good, but every later wake
+  while Steam was still suspended took one again: a game starting or ending in
+  Off mode, or picking Off during a game. There is nothing to kill at those
+  moments anyway - the webhelpers die with the suspend, and a trace of a real
+  game showed none start again until Steam was resumed.
 
 ## 1.2.6
 

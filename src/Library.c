@@ -937,9 +937,14 @@ static DWORD WINAPI WatcherThreadProc(LPVOID lpParameter)
 
         // Same collect-then-suspend-then-terminate ordering as the initial
         // apply above; see there for why the snapshot must not happen while
-        // Steam's UI thread is frozen.
+        // Steam's UI thread is frozen. That rules out collecting while it is
+        // frozen *already*, too - a wake during a game or in Off mode, when an
+        // override pick or any value Steam writes under its key lands here with
+        // CEF still disabled - and there is nothing to collect then anyway:
+        // the webhelpers died with the suspend, and a trace of a real game
+        // showed none start again until the moment Steam was resumed.
         HANDLE kill[MAX_WEBHELPERS];
-        UINT killCount = disabled ? CollectWebHelperChildren(kill, MAX_WEBHELPERS) : 0;
+        UINT killCount = disabled && !suspended ? CollectWebHelperChildren(kill, MAX_WEBHELPERS) : 0;
         BOOL applied = ApplyThreadState(hThread, disabled, &suspended);
         TerminateCollected(kill, killCount);
 
