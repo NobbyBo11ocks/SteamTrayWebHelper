@@ -94,11 +94,14 @@ Source: "{#DllSource}"; DestDir: "{app}"; DestName: "umpdc.dll"; \
 Root: HKCU; Subkey: "SOFTWARE\NoSteamWebHelper"; Flags: dontcreatekey uninsdeletekey
 
 [Run]
-; runasoriginaluser matters here: Setup itself runs elevated (PrivilegesRequired=
-; admin), and without this flag Steam would inherit that elevated token. An
-; elevated Steam launches every game elevated too and loses drag-and-drop from
-; Explorer - the state Valve's own client warns about. This hands the launch
-; back to the logged-on user instead.
+; Steam must start as the logged-on user, not with Setup's elevated token
+; (PrivilegesRequired=admin): an elevated Steam launches every game elevated too
+; and loses drag-and-drop from Explorer - the state Valve's own client warns
+; about. Inno's documentation makes runasoriginaluser the default for postinstall
+; entries anyway; it is spelled out so that stays true if the flags change.
+; Neither it nor ExecAsOriginalUser below can help when Setup itself was started
+; with "Run as administrator" - Inno then never had the user's own credentials
+; to hand back - which is why the README no longer tells anyone to do that.
 Filename: "{app}\steam.exe"; Description: "Launch Steam now"; \
     Flags: postinstall nowait skipifsilent unchecked runasoriginaluser
 
@@ -185,7 +188,22 @@ var
 begin
   SteamExe := ExpandConstant('{app}\steam.exe');
   if FileExists(SteamExe) then
-    Exec(SteamExe, '-shutdown', '', SW_HIDE, ewNoWait, Rc);
+  begin
+    { Exec runs a program "using the same credentials as Setup/Uninstall", so
+      this would start an elevated steam.exe - the very thing the [Run] entry
+      is careful to avoid. ExecAsOriginalUser starts it as the user who
+      launched Setup instead. Inno does not support that function at uninstall
+      time, so the uninstaller has to keep Exec. }
+    if IsUninstaller() then
+      Exec(SteamExe, '-shutdown', '', SW_HIDE, ewNoWait, Rc)
+    else
+      try
+        ExecAsOriginalUser(SteamExe, '-shutdown', '', SW_HIDE, ewNoWait, Rc);
+      except
+        { Inno documents an exception here only in "very unusual failure
+          cases". The forced close below still runs either way. }
+      end;
+  end;
 
   { Give Steam up to ~12s to exit cleanly. }
   for I := 1 to 12 do

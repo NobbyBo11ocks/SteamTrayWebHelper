@@ -62,7 +62,7 @@ Both installation methods are provided as separate files on the [Releases page](
 ### Installer — recommended
 
 1. Download [`SteamTrayWebHelper.exe`](https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases/latest/download/SteamTrayWebHelper.exe).
-2. Run the installer as administrator.
+2. Run the installer by double-clicking it. It asks for administrator permission by itself, because it writes into Steam's folder. Avoid right-click → **Run as administrator**: that leaves Setup unable to start Steam as you afterwards, so a Steam it launches would run elevated.
 3. Confirm the folder containing `steam.exe`.
 4. Complete installation and start Steam normally.
 

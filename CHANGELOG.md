@@ -20,6 +20,13 @@ so keep the heading exactly `## <version>`.
   thread woke, it would run code that was no longer there and crash Steam.
   Reproduced by loading and freeing the previous build; the module is now
   pinned before the thread starts.
+- Setup no longer starts `steam.exe` with administrator rights when it asks a
+  running Steam to close. Inno Setup's `Exec` runs a program with Setup's own
+  elevated credentials; `ExecAsOriginalUser` is used instead. The uninstaller
+  still uses `Exec`, the only option Inno Setup supports there.
+- The README no longer says to run the installer as administrator. It already
+  asks for elevation itself, and starting it with "Run as administrator" stops
+  Setup from launching Steam as the signed-in user afterwards.
 
 ## 1.2.4
 
