@@ -144,9 +144,11 @@ so keep the heading exactly `## <version>`.
 ### Added
 
 - **Reproducible builds.** Rebuilding a tag with the recorded toolchain now
-  produces a byte-identical `umpdc.dll`, and therefore an identical installer.
-  Previously every build differed: the DLL embedded a link timestamp and MinGW
-  chose a fresh image base each time. ASLR is unaffected.
+  produces a byte-identical `umpdc.dll`. Previously every build differed: the
+  DLL embedded a link timestamp and MinGW chose a fresh image base each time.
+  ASLR is unaffected. (This entry first said the installer would be identical
+  too. It is not: Inno Setup records the DLL's last-modified time, which
+  changes with every build.)
 - **Signed build provenance.** Each released binary carries a SLSA attestation
   tying it to the commit and workflow run that produced it, verifiable with
   `gh attestation verify`.

@@ -221,7 +221,7 @@ That answers a stronger question than a checksum does. A digest only proves the 
 
 ### Reproduce the build yourself
 
-The build is deterministic: rebuilding the same commit with the same toolchain produces a **byte-identical** `umpdc.dll`, and therefore a byte-identical `SteamTrayWebHelper.exe` as well, since the installer just bundles that DLL. Check out the tag matching the release, follow [Building from source](#building-from-source), and compare:
+The DLL build is deterministic: rebuilding the same commit with the same toolchain produces a **byte-identical** `umpdc.dll`. Check out the tag matching the release, follow [Building from source](#building-from-source), and compare:
 
 ```powershell
 Get-FileHash .\src\bin\umpdc.dll -Algorithm SHA256
@@ -229,15 +229,22 @@ Get-FileHash .\src\bin\umpdc.dll -Algorithm SHA256
 
 The digest should match the published `umpdc.dll.sha256` exactly. If it does, the release binary provably contains nothing that isn't in this repository.
 
-This requires the **same toolchain** the release was built with. `ld` stamps its own version into the PE header, so a different binutils changes the file — and its checksum — without changing a single instruction. Every release ships a `toolchain.txt` listing exactly what produced it:
+This requires the **same toolchain** the release was built with. `ld` stamps its own version into the PE header, so a different binutils changes the file — and its checksum — without changing a single instruction. Every release ships a `toolchain.txt` listing exactly what produced it. 1.3.0's reads:
 
 ```text
-gcc:     gcc.exe (Rev5, Built by MSYS2 project) 16.1.0
-ld:      GNU ld (GNU Binutils) 2.46.1
-windres: GNU windres (GNU Binutils) 2.46.1
+gcc:     gcc.exe (Rev4, Built by MSYS2 project) 16.2.0
+ld:      GNU ld (GNU Binutils) 2.47.20260726
+windres: GNU windres (GNU Binutils) 2.47.20260726
+python:  Pillow 12.3.0 numpy 2.5.3 on 3.14.7
 ```
 
 If your digest differs by only a byte or two, compare that file first — a binutils mismatch is the usual cause, and it is not a sign that anything is wrong with the binary.
+
+The installer can't be checked this way: two builds of the same commit give different `SteamTrayWebHelper.exe` files. Inno Setup records the last-modified time of the DLL it bundles, which is the moment that DLL was built, and the installer's own code comes from whichever Inno Setup version compiled it. To check an installer, verify its attestation (see [Build provenance](#build-provenance)), or install it and compare the installed DLL with the published `umpdc.dll.sha256`:
+
+```powershell
+Get-FileHash "C:\Program Files (x86)\Steam\umpdc.dll" -Algorithm SHA256
+```
 
 ---
 
@@ -328,7 +335,7 @@ pip install pillow numpy
 python make_icon.py
 ```
 
-This reproduces `icon_on.ico` and `icon_off.ico` byte-for-byte from `steam_logo_source.png` - see [Tray icons and controls](#tray-icons-and-controls) for where that source comes from.
+This reproduces `icon_on.ico` and `icon_off.ico` pixel-for-pixel from `steam_logo_source.png`, which CI checks on every build - see [Tray icons and controls](#tray-icons-and-controls) for where that source comes from. The files' bytes can still differ, because two Pillow builds, even of the same version, can compress identical pixels differently.
 
 ### 5. (Optional) Build the installer
 
