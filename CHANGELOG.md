@@ -4,7 +4,7 @@ Notable changes per release. The section matching a tag becomes that release's
 notes on the [Releases page](https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases),
 so keep the heading exactly `## <version>`.
 
-## Unreleased
+## 1.2.7
 
 ### Fixed
 
