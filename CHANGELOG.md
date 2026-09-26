@@ -8,6 +8,13 @@ so keep the heading exactly `## <version>`.
 
 ### Fixed
 
+- **The tray icon no longer stays behind after Steam exits.** Exiting Steam
+  ends the helper's threads without running any of their cleanup, so the icon
+  was never removed and lingered until the mouse passed over it. Removing it
+  while the DLL unloads is something Microsoft documents as unsafe. Instead,
+  the icon now comes down when Steam destroys its own UI windows on the way
+  out - which a trace of a real Steam exit showed happening 1.5 seconds before
+  the process ends - and comes back if those windows ever return.
 - The DLL now only runs inside `steam.exe`. Windows searches an application's
   own folder for a DLL before System32, so any other program in Steam's folder
   that loads `umpdc.dll` - `GameOverlayUI.exe` and `steamerrorreporter.exe` live

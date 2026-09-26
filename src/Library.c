@@ -19,6 +19,7 @@
 
 #define WM_TRAYSTATE (WM_APP + 1)
 #define WM_REHOTKEY (WM_APP + 2) // override key changed; re-read the hotkey binding
+#define WM_STEAMUI (WM_APP + 3)  // wParam: whether any of Steam's UI windows still exists
 
 // Optional overrides for the toggle hotkey, stored beside the mode override.
 // Absent or unusable values fall back to Ctrl+Alt+L, so a bad edit costs the
@@ -275,6 +276,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     // the correct icon straight back without waiting for the next state change.
     static BOOL trayDisabled;
 
+    // Whether the icon has been taken down because Steam's UI windows are gone
+    // (see WM_STEAMUI). While it is, nothing else here may add or modify it.
+    static BOOL iconWithdrawn;
+
     switch (uMsg)
     {
     case WM_CREATE:
@@ -288,6 +293,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         trayDisabled = disabled;
         nid.hIcon = disabled ? hIconOff : hIconOn;
         lstrcpyW(nid.szTip, disabled ? L"Steam WebHelper - CEF Disabled" : L"Steam WebHelper - CEF Enabled");
+        // Static, so it would otherwise carry over from a previous tray window.
+        iconWithdrawn = FALSE;
         Shell_NotifyIconW(NIM_ADD, &nid);
 
         RegisterToggleHotkey(hWnd);
@@ -309,9 +316,29 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         lstrcpyW(nid.szTip, disabled ? L"Steam WebHelper - CEF Disabled" : L"Steam WebHelper - CEF Enabled");
         if (!applied)
             lstrcatW(nid.szTip, L" (not applied)");
-        Shell_NotifyIconW(NIM_MODIFY, &nid);
+        // Kept current even while withdrawn, so a returning icon is right.
+        if (!iconWithdrawn)
+            Shell_NotifyIconW(NIM_MODIFY, &nid);
         break;
     }
+
+    case WM_STEAMUI:
+        // Posted by WinEventProc when the last of Steam's UI windows is
+        // destroyed (wParam FALSE) or one appears again (TRUE). Steam destroys
+        // them while it shuts down, and that is the last point at which this
+        // thread still runs: see gSteamUiWindows for why the icon cannot be
+        // removed any later.
+        if (!wParam && !iconWithdrawn)
+        {
+            Shell_NotifyIconW(NIM_DELETE, &nid);
+            iconWithdrawn = TRUE;
+        }
+        else if (wParam && iconWithdrawn)
+        {
+            iconWithdrawn = FALSE;
+            Shell_NotifyIconW(NIM_ADD, &nid);
+        }
+        break;
 
     case WM_REHOTKEY:
         // The override key changed, which is also where the hotkey binding
@@ -333,7 +360,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             InvalidateTrayVisuals();
             EnsureTrayIconsLoaded();
             nid.hIcon = trayDisabled ? hIconOff : hIconOn;
-            Shell_NotifyIconW(NIM_MODIFY, &nid);
+            if (!iconWithdrawn)
+                Shell_NotifyIconW(NIM_MODIFY, &nid);
         }
         break;
 
@@ -514,8 +542,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
     case WM_DESTROY:
         // Remove the tray icon explicitly instead of leaving a ghost for the
-        // shell to garbage-collect on the next mouse-over. Reached on a clean
-        // Steam shutdown / restart into a new session.
+        // shell to garbage-collect on the next mouse-over. Only reached when
+        // the window is destroyed normally, though - not when Steam exits:
+        // ExitProcess terminates this thread without running any of its code,
+        // and the window goes with it. WM_STEAMUI is what removes the icon then.
         Shell_NotifyIconW(NIM_DELETE, &nid);
         UnregisterHotKey(hWnd, IDH_TOGGLE);
         hTrayWnd = NULL;
@@ -534,7 +564,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         // WM_CREATE runs, and stays 0 if RegisterWindowMessageW ever fails, so
         // without it every WM_NULL - including the one the tray menu posts to
         // itself after TrackPopupMenu - would land here instead.
-        if (msgTaskbarCreated && uMsg == msgTaskbarCreated)
+        if (msgTaskbarCreated && uMsg == msgTaskbarCreated && !iconWithdrawn)
             Shell_NotifyIconW(NIM_ADD, &nid);
         break;
     }
@@ -826,12 +856,79 @@ cleanup:
     return EXIT_SUCCESS;
 }
 
+// Steam's UI windows: the titled vguiPopupWindows whose creation starts the
+// tray (see WinEventProc), recorded by handle for as long as they exist.
+// Touched only by the hook thread, which is where out-of-context WinEvents are
+// delivered.
+//
+// This is what takes the tray icon down when Steam exits. ExitProcess ends
+// every other thread without running any more of its code, so the tray window
+// never sees WM_DESTROY and Explorer keeps showing its icon until the mouse
+// passes over it. Removing the icon from DLL_PROCESS_DETACH instead is what the
+// DllMain documentation rules out: once the process is terminating it is "not
+// safe for the DLL to clean up", and Shell calls there "can cause access
+// violation errors". What Steam does do is destroy these windows on its main
+// thread as it shuts down: on a traced exit, 1.5 s before the process ended,
+// and not once earlier in that session. That gap is when the icon comes down,
+// from the tray's own thread while it is still running.
+#define MAX_STEAM_UI_WINDOWS 16
+static HWND gSteamUiWindows[MAX_STEAM_UI_WINDOWS];
+static UINT gSteamUiWindowCount;
+// Set if more existed at once than the array holds. "None left" can no longer
+// be known from then on, so the icon is never taken down on that basis.
+static BOOL gSteamUiWindowsOverflowed;
+
+static VOID PostSteamUiState(BOOL present)
+{
+    HWND hWnd = hTrayWnd;
+    if (hWnd)
+        PostMessageW(hWnd, WM_STEAMUI, present, 0);
+}
+
+static VOID RememberSteamUiWindow(HWND hwnd)
+{
+    for (UINT i = 0; i < gSteamUiWindowCount; i++)
+        if (gSteamUiWindows[i] == hwnd)
+            return;
+    if (gSteamUiWindowCount == MAX_STEAM_UI_WINDOWS)
+    {
+        gSteamUiWindowsOverflowed = TRUE;
+        return;
+    }
+    gSteamUiWindows[gSteamUiWindowCount++] = hwnd;
+    // The first one back after they had all gone brings the icon back with it.
+    // For the very first one the tray window does not exist yet, so nothing is
+    // posted, and the tray adds its own icon as it is created.
+    if (gSteamUiWindowCount == 1)
+        PostSteamUiState(TRUE);
+}
+
+// EVENT_OBJECT_DESTROY arrives once the window is already gone, so it is
+// matched against the handles recorded while it existed rather than queried.
+static VOID ForgetSteamUiWindow(HWND hwnd)
+{
+    for (UINT i = 0; i < gSteamUiWindowCount; i++)
+        if (gSteamUiWindows[i] == hwnd)
+        {
+            gSteamUiWindows[i] = gSteamUiWindows[--gSteamUiWindowCount];
+            if (gSteamUiWindowCount == 0 && !gSteamUiWindowsOverflowed)
+                PostSteamUiState(FALSE);
+            return;
+        }
+}
+
 static VOID CALLBACK WinEventProc(HWINEVENTHOOK hWinEventHook, DWORD event, HWND hwnd, LONG idObject, LONG idChild,
                                   DWORD dwEventThread, DWORD dwmsEventTime)
 {
     (void)hWinEventHook;
-    (void)idChild;
     (void)dwmsEventTime;
+
+    if (event == EVENT_OBJECT_DESTROY)
+    {
+        if (idObject == OBJID_WINDOW && idChild == CHILDID_SELF)
+            ForgetSteamUiWindow(hwnd);
+        return;
+    }
 
     // idObject == OBJID_WINDOW means the window itself just showed, not one
     // of its child controls - EVENT_OBJECT_SHOW otherwise fires constantly
@@ -866,6 +963,8 @@ static VOID CALLBACK WinEventProc(HWINEVENTHOOK hWinEventHook, DWORD event, HWND
     if (CompareStringOrdinal(L"vguiPopupWindow", -1, szClassName, -1, FALSE) != CSTR_EQUAL ||
         GetWindowTextLengthW(hwnd) < 1)
         return;
+
+    RememberSteamUiWindow(hwnd);
 
     if (InterlockedCompareExchange(&gTrayThreadStarted, 1, 0) == 0)
     {
@@ -984,8 +1083,8 @@ static DWORD WINAPI HookThreadProc(LPVOID lpParameter)
 {
     (void)lpParameter;
 
-    // Range covers CREATE (existing tray/watcher bootstrap), DESTROY (ignored
-    // - ends up in WinEventProc's default fallthrough), and SHOW (the auto-
+    // Range covers CREATE (tray/watcher bootstrap), DESTROY (taking the tray
+    // icon down as Steam exits - see gSteamUiWindows), and SHOW (the auto-
     // restore suppression above). EVENT_OBJECT_HIDE is one past the end of
     // this range and is intentionally excluded - nothing here needs it.
     if (!SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_SHOW, NULL, WinEventProc, GetCurrentProcessId(), 0,
@@ -1001,6 +1100,12 @@ static DWORD WINAPI HookThreadProc(LPVOID lpParameter)
     return EXIT_SUCCESS;
 }
 
+// The DLL's entry point, called by the loader under its loader lock; there is
+// no CRT (-nostdlib), so nothing runs before it. On attach inside steam.exe it
+// pins the module and starts the hook thread, and every other thread is started
+// from that hook. Nothing is done on detach: a process that is exiting has
+// already terminated every other thread, and cleaning up then is what the
+// DllMain documentation warns against.
 BOOL WINAPI DllMainCRTStartup(HINSTANCE hLibModule, DWORD dwReason, LPVOID lpReserved)
 {
     (void)lpReserved;
