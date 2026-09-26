@@ -4,6 +4,29 @@ Notable changes per release. The section matching a tag becomes that release's
 notes on the [Releases page](https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases),
 so keep the heading exactly `## <version>`.
 
+## 1.3.0
+
+### Changed
+
+- **The tray icon is now Steam's own icon, in black.** It is Valve's plain
+  Steam icon (recoloured black when CEF is enabled, red when disabled),
+  round, with transparent corners, at every tray size. The icon generator
+  used to quantize each frame to a 64-colour palette to shrink the file,
+  which discards the alpha channel - so the round icon became a solid black
+  or red square with the glyph carved into it. Frames are now kept as
+  32-bit RGBA (full transparency), and only tray sizes (16-64px) are
+  emitted, since a tray helper is never shown at file-manager sizes.
+
+### Fixed
+
+- The tray thread and the watcher thread could write the shared Steam-folder
+  buffer at the same time - a data race introduced with 1.2.7's post-game
+  pop-up fix, which reached that buffer from both threads. It is now filled
+  once, before either thread starts.
+
+- The menu-font setup read the system non-client metrics twice where once
+  was enough.
+
 ## 1.2.7
 
 ### Fixed

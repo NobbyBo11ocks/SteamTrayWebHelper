@@ -12,7 +12,7 @@
 ; ============================================================================
 
 #define MyAppName "NoSteamWebHelper"
-#define MyAppVersion "1.2.7"
+#define MyAppVersion "1.3.0"
 #define MyAppPublisher "NoSteamWebHelper"
 #define MyAppURL "https://github.com/NobbyBo11ocks/SteamTrayWebHelper"
 #define DllSource "..\src\bin\umpdc.dll"

@@ -4,28 +4,46 @@ Generates icon_on.ico / icon_off.ico from steam_logo_source.png.
 The source is the genuine Steam application icon (extracted directly from
 Valve's own steam.exe resources, group 101 - the plain icon, not the
 notification/voice-chat badge variants), so it already carries real
-per-pixel alpha and clean antialiasing; no background-removal hack is
-needed here. The white glyph is kept white and everything else (the blue
-circle, and the internal antialiased blend between glyph and circle) is
-remapped to this app's own state colour, using each pixel's "whiteness"
-(how close its RGB is to pure white) as the blend factor - so every edge
-Valve antialiased, internal or outer, stays exactly as smooth, just recoloured.
+per-pixel alpha and clean antialiasing. The white glyph is kept white and
+everything else (the blue circle, and the internal antialiased blend between
+glyph and circle) is remapped to this app's own state colour, using each
+pixel's "whiteness" (how close its RGB is to pure white) as the blend
+factor - so every edge Valve antialiased, internal or outer, stays exactly
+as smooth, just recoloured. The result is Steam's own round icon in black
+(enabled) or red (disabled), identical in shape and size to the real thing.
+
+The icon's transparency is preserved end to end. Steam's icon is a circle:
+its corners are transparent, and its whole rim is an antialiased alpha ramp.
+An earlier version of this script quantized each frame to a 64-colour palette
+to shrink the file, but palette quantization discards the alpha channel, so
+the corners came back fully opaque and the tray showed a solid black (or red)
+square instead of the round logo. Frames are therefore kept as 32-bit RGBA
+(Pillow stores each as a PNG stream inside the .ico, which Windows Vista+ and
+Inno Setup's SetupIconFile both read), which is both correct and, at these
+sizes, smaller than the broken quantized version was.
+
+Only tray sizes are emitted. A notification-area icon is requested at
+GetSystemMetrics(SM_CXSMICON), which is 16px at 100% scaling and rises with
+DPI to 48px at 300%; 64px covers still higher scaling. Larger frames (128,
+256) are what a file-manager "extra large icons" view would use, which a tray
+helper's DLL is never shown in, so carrying them would just be dead weight in
+the shipped binary - the .rsrc section is most of the DLL's size.
 """
 
 import numpy as np
 from PIL import Image, ImageFilter
 
-RED = np.array([222, 62, 58])   # disabled-state accent
-BLACK = np.array([0, 0, 0])
+RED = np.array([222, 62, 58])   # disabled-state accent (matches steam.styles error red)
+BLACK = np.array([0, 0, 0])     # enabled-state colour
 WHITE = np.array([255, 255, 255])
 
 SOURCE = "steam_logo_source.png"
-SIZES = [16, 20, 24, 32, 40, 48, 64, 128, 256]
+SIZES = [16, 20, 24, 32, 40, 48, 64]
 
-# Downsampling the source's thin ring/glyph strokes all the way to the tray's
-# actual on-screen sizes (16-32px) softens them into a grey smear. A light
-# unsharp mask restores edge contrast there; it's skipped above 32px where
-# LANCZOS alone already looks crisp and sharpening would just add haloing.
+# Downsampling the source's thin ring/glyph strokes to the tray's actual
+# on-screen sizes (16-32px) softens them into a grey smear. A light unsharp
+# mask restores edge contrast there; it's skipped above 32px where LANCZOS
+# alone already looks crisp and sharpening would just add haloing.
 SHARPEN_UP_TO = 32
 UNSHARP = ImageFilter.UnsharpMask(radius=1.0, percent=180, threshold=2)
 
@@ -56,9 +74,9 @@ def build(rgb, alpha, circle_color):
 
     # Fully-transparent pixels keep whatever colour they inherited from the
     # source, which varies pixel-to-pixel and is invisible but not free: it
-    # still costs palette slots and compresses worse. Flattening it to one
-    # constant colour is lossless (alpha is 0 either way) and roughly halves
-    # the encoded size once the palette step below runs.
+    # still compresses worse. Flattening it to one constant colour is lossless
+    # (alpha is 0 either way) and shrinks the encoded frame. The alpha channel
+    # itself is carried through untouched, which is what keeps the icon round.
     out_rgb = np.where(alpha[..., None] == 0, WHITE, out_rgb)
 
     out = np.dstack([out_rgb, alpha]).astype(np.uint8)
@@ -66,24 +84,17 @@ def build(rgb, alpha, circle_color):
 
 
 def make(path, img):
-    imgs = []
+    frames = []
     for s in SIZES:
         frame = img.resize((s, s), Image.LANCZOS)
         if s <= SHARPEN_UP_TO:
             frame = frame.filter(UNSHARP)
-        # The glyph is a flat-colour shape with one antialiased edge, i.e. a
-        # true-colour RGBA PNG spends most of its bytes on a gradient that a
-        # small indexed palette reproduces losslessly to the eye (verified
-        # visually against the unquantized frame - no discernible banding).
-        # This is what actually dominates the shipped DLL's size: the .rsrc
-        # section holding these icons is ~85% of it, code is a few KB.
-        frame = frame.quantize(colors=64, method=Image.FASTOCTREE, dither=Image.Dither.NONE)
-        imgs.append(frame)
-    imgs[-1].save(
+        frames.append(frame)
+    frames[-1].save(
         path,
         format="ICO",
         sizes=[(s, s) for s in SIZES],
-        append_images=imgs[:-1],
+        append_images=frames[:-1],
     )
     print("wrote", path)
 
