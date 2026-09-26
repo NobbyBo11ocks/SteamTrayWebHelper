@@ -946,6 +946,11 @@ static DWORD WINAPI TrayThreadProc(LPVOID lpParameter)
 // terminated, and the watcher suspends the host's UI thread. Any other host
 // that happened to create a titled vguiPopupWindow would get a second tray icon
 // and have its own UI thread suspended for as long as a game runs.
+//
+// Called from DllMainCRTStartup, under the loader lock, so it sticks to plain
+// kernel32 calls. The name is compared by hand rather than with
+// CompareStringOrdinal: folding ASCII case is exact for an ASCII name, and it
+// keeps the entry point from depending on anything but memory it already has.
 static BOOL IsHostSteam(VOID)
 {
     WCHAR path[MAX_PATH];
@@ -958,7 +963,18 @@ static BOOL IsHostSteam(VOID)
         if (path[i] == L'\\')
             name = i + 1;
 
-    return CompareStringOrdinal(path + name, (INT)(len - name), L"steam.exe", -1, TRUE) == CSTR_EQUAL;
+    static const WCHAR kSteam[] = L"steam.exe";
+    if (len - name != ARRAYSIZE(kSteam) - 1)
+        return FALSE;
+    for (DWORD i = 0; i < ARRAYSIZE(kSteam) - 1; i++)
+    {
+        WCHAR c = path[name + i];
+        if (c >= L'A' && c <= L'Z')
+            c += L'a' - L'A';
+        if (c != kSteam[i])
+            return FALSE;
+    }
+    return TRUE;
 }
 
 // Installs the WinEvent hook and pumps messages for it. SetWinEventHook with
@@ -967,13 +983,6 @@ static BOOL IsHostSteam(VOID)
 static DWORD WINAPI HookThreadProc(LPVOID lpParameter)
 {
     (void)lpParameter;
-
-    // Checked here rather than in DllMainCRTStartup, which runs under the loader
-    // lock and should stay as close to doing nothing as possible. Every other
-    // thread is started from the hook installed below, so returning now leaves
-    // any other host completely untouched.
-    if (!IsHostSteam())
-        return EXIT_SUCCESS;
 
     // Range covers CREATE (existing tray/watcher bootstrap), DESTROY (ignored
     // - ends up in WinEventProc's default fallthrough), and SHOW (the auto-
@@ -1000,6 +1009,29 @@ BOOL WINAPI DllMainCRTStartup(HINSTANCE hLibModule, DWORD dwReason, LPVOID lpRes
     {
         hModule = hLibModule;
         DisableThreadLibraryCalls(hLibModule);
+
+        // Any other program in Steam's folder gets no thread at all; see
+        // IsHostSteam. Loading into it stays harmless that way.
+        if (!IsHostSteam())
+            return TRUE;
+
+        // The threads started from here run for the life of the process, and
+        // nothing can stop them from DllMain, so this module must never be
+        // unmapped underneath them. A DLL loaded at startup by static imports
+        // stays loaded anyway, but one reached through LoadLibrary - directly
+        // or as some other DLL's dependency - is unmapped by the matching
+        // FreeLibrary, and the next time one of these threads woke it would
+        // execute memory that is no longer there, taking Steam down with it.
+        // Pinning keeps it mapped "until the process is terminated, no matter
+        // how many times FreeLibrary is called". Done before the thread exists
+        // so there is no window where one runs unpinned; GetModuleHandleExW is
+        // a kernel32 call, which is what DllMain is allowed to make. Without
+        // the pin there is no safe way to run, so the helper stays off.
+        HMODULE hPinned;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                                (LPCWSTR)hLibModule, &hPinned))
+            return TRUE;
+
         // CreateThread is safe here (the new thread only starts running after
         // the loader lock is released); the thread itself does no loading.
         HANDLE hThread = CreateThread(NULL, 0, HookThreadProc, NULL, 0, NULL);

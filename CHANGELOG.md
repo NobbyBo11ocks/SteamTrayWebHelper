@@ -14,6 +14,12 @@ so keep the heading exactly `## <version>`.
   there too - would get this DLL as well, and nothing stopped it starting there.
   In a host that created a titled `vguiPopupWindow`, that meant a second tray
   icon and that program's UI thread suspended for as long as a game ran.
+- The DLL can no longer be unloaded out from under its own threads. Its
+  background thread runs for the life of the process, but nothing kept the DLL
+  mapped if whatever loaded `umpdc.dll` freed it again - and the next time that
+  thread woke, it would run code that was no longer there and crash Steam.
+  Reproduced by loading and freeing the previous build; the module is now
+  pinned before the thread starts.
 
 ## 1.2.4
 
