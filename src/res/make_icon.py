@@ -12,15 +12,19 @@ factor - so every edge Valve antialiased, internal or outer, stays exactly
 as smooth, just recoloured. The result is Steam's own round icon in black
 (enabled) or red (disabled), identical in shape and size to the real thing.
 
-The icon's transparency is preserved end to end. Steam's icon is a circle:
-its corners are transparent, and its whole rim is an antialiased alpha ramp.
-An earlier version of this script quantized each frame to a 64-colour palette
-to shrink the file, but palette quantization discards the alpha channel, so
-the corners came back fully opaque and the tray showed a solid black (or red)
-square instead of the round logo. Frames are therefore kept as 32-bit RGBA
-(Pillow stores each as a PNG stream inside the .ico, which Windows Vista+ and
-Inno Setup's SetupIconFile both read), which is both correct and, at these
-sizes, smaller than the broken quantized version was.
+Frames are kept as full 32-bit RGBA: Pillow stores each as a PNG stream
+inside the .ico, which Windows Vista+ and Inno Setup's SetupIconFile both
+read. Up to 1.2.7 this script quantized each frame to a 64-colour palette to
+shrink the file. That kept the round shape - the palette PNG carries
+per-colour transparency, which Windows honours - but cut the shading of the
+antialiased edges to the palette's few levels (46 distinct colours in the
+16px red icon, against 189 in full colour). Full colour costs about 2 KB per
+icon.
+
+To inspect an icon, read each frame with IcoFile.getimage(), as CI does.
+Image.open() on an .ico keeps a palette frame's pixels but drops its
+transparency, so a quantized icon read that way looks like an opaque square
+when it is not.
 
 Only tray sizes are emitted. A notification-area icon is requested at
 GetSystemMetrics(SM_CXSMICON), which is 16px at 100% scaling and rises with

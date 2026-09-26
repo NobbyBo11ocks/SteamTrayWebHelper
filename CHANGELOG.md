@@ -8,14 +8,19 @@ so keep the heading exactly `## <version>`.
 
 ### Changed
 
-- **The tray icon is now Steam's own icon, in black.** It is Valve's plain
-  Steam icon (recoloured black when CEF is enabled, red when disabled),
-  round, with transparent corners, at every tray size. The icon generator
-  used to quantize each frame to a 64-colour palette to shrink the file,
-  which discards the alpha channel - so the round icon became a solid black
-  or red square with the glyph carved into it. Frames are now kept as
-  32-bit RGBA (full transparency), and only tray sizes (16-64px) are
-  emitted, since a tray helper is never shown at file-manager sizes.
+- **Tray icon frames are stored in full colour.** The icon itself is
+  unchanged: Valve's plain Steam icon, round, recoloured black when CEF is
+  enabled and red when disabled. Each frame used to be reduced to a
+  64-colour palette to shrink the file, which limited the shading of its
+  antialiased edges; frames are now kept as 32-bit RGBA. On a dark taskbar
+  the black icon looks the same and the red one has slightly smoother edges.
+  Only tray sizes (16-64px) are emitted now, since a tray helper is never
+  shown at file-manager sizes. Full-colour frames compress less well, so the
+  DLL is 3.5 KB larger.
+
+  An earlier version of these notes said the old icon showed as a solid
+  square. It did not: its palette kept the transparency, and Windows drew it
+  round.
 
 ### Fixed
 
