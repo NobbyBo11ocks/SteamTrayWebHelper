@@ -4,6 +4,17 @@ Notable changes per release. The section matching a tag becomes that release's
 notes on the [Releases page](https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases),
 so keep the heading exactly `## <version>`.
 
+## Unreleased
+
+### Fixed
+
+- The DLL now only runs inside `steam.exe`. Windows searches an application's
+  own folder for a DLL before System32, so any other program in Steam's folder
+  that loads `umpdc.dll` - `GameOverlayUI.exe` and `steamerrorreporter.exe` live
+  there too - would get this DLL as well, and nothing stopped it starting there.
+  In a host that created a titled `vguiPopupWindow`, that meant a second tray
+  icon and that program's UI thread suspended for as long as a game ran.
+
 ## 1.2.4
 
 ### Fixed

@@ -937,12 +937,43 @@ static DWORD WINAPI TrayThreadProc(LPVOID lpParameter)
     return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
+// Whether the process that loaded this DLL is steam.exe itself. Windows looks
+// for a DLL in the application's own folder before System32, so any program in
+// Steam's folder that loads umpdc.dll gets this one, not only steam.exe - and
+// GameOverlayUI.exe and steamerrorreporter.exe live in that folder too.
+// Everything else in this file assumes steam.exe is the host: gSteamDir is the
+// host's own folder, only the host's direct steamwebhelper.exe children are
+// terminated, and the watcher suspends the host's UI thread. Any other host
+// that happened to create a titled vguiPopupWindow would get a second tray icon
+// and have its own UI thread suspended for as long as a game runs.
+static BOOL IsHostSteam(VOID)
+{
+    WCHAR path[MAX_PATH];
+    DWORD len = GetModuleFileNameW(NULL, path, MAX_PATH);
+    if (len == 0 || len == MAX_PATH)
+        return FALSE;
+
+    DWORD name = 0; // start of the file name, just past the last backslash
+    for (DWORD i = 0; i < len; i++)
+        if (path[i] == L'\\')
+            name = i + 1;
+
+    return CompareStringOrdinal(path + name, (INT)(len - name), L"steam.exe", -1, TRUE) == CSTR_EQUAL;
+}
+
 // Installs the WinEvent hook and pumps messages for it. SetWinEventHook with
 // WINEVENT_OUTOFCONTEXT requires the installing thread to run a message loop;
 // callbacks are delivered through it.
 static DWORD WINAPI HookThreadProc(LPVOID lpParameter)
 {
     (void)lpParameter;
+
+    // Checked here rather than in DllMainCRTStartup, which runs under the loader
+    // lock and should stay as close to doing nothing as possible. Every other
+    // thread is started from the hook installed below, so returning now leaves
+    // any other host completely untouched.
+    if (!IsHostSteam())
+        return EXIT_SUCCESS;
 
     // Range covers CREATE (existing tray/watcher bootstrap), DESTROY (ignored
     // - ends up in WinEventProc's default fallthrough), and SHOW (the auto-
