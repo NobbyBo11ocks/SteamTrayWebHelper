@@ -4,6 +4,28 @@ Notable changes per release. The section matching a tag becomes that release's
 notes on the [Releases page](https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases),
 so keep the heading exactly `## <version>`.
 
+## 1.2.7
+
+### Fixed
+
+- **Steam's main window no longer pops up when a game closes.** The
+  suppression added in 1.2.0 waited for `steam.exe` to show a
+  `vguiPopupWindow`, but in Steam's current client the main window belongs to
+  `steamwebhelper.exe`. A trace of a real game exit showed it as an `SDL_app`
+  window titled "Steam", shown by the freshly restarted `steamwebhelper.exe`
+  2.3 seconds after the game ended, while no `steam.exe` window was shown at
+  all - so the suppression never fired. It now watches for that window
+  instead: still only for about 8 seconds after an automatic restore, and
+  still only the first window, so reopening Steam from its tray icon works as
+  before.
+- The watcher no longer takes a process snapshot while Steam's UI thread is
+  suspended. 1.2.3 moved the snapshot out of that window because it allocates
+  from the process heap and could freeze Steam for good, but every later wake
+  while Steam was still suspended took one again: a game starting or ending in
+  Off mode, or picking Off during a game. There is nothing to kill at those
+  moments anyway - the webhelpers die with the suspend, and a trace of a real
+  game showed none start again until Steam was resumed.
+
 ## 1.2.6
 
 ### Fixed

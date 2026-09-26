@@ -20,6 +20,10 @@
 #define WM_TRAYSTATE (WM_APP + 1)
 #define WM_REHOTKEY (WM_APP + 2) // override key changed; re-read the hotkey binding
 #define WM_STEAMUI (WM_APP + 3)  // wParam: whether any of Steam's UI windows still exists
+#define WM_SUPPRESSSHOW (WM_APP + 4) // wParam: arm (TRUE) or end (FALSE) the post-game pop-up suppression
+
+#define IDT_SUPPRESSSHOW 1     // tray window timer: how long the pop-up suppression stays armed
+#define SUPPRESS_SHOW_MS 8000
 
 // Optional overrides for the toggle hotkey, stored beside the mode override.
 // Absent or unusable values fall back to Ctrl+Alt+L, so a bad edit costs the
@@ -42,6 +46,8 @@
 static DWORD WINAPI TrayThreadProc(LPVOID lpParameter);
 static DWORD WINAPI HookThreadProc(LPVOID lpParameter);
 static DWORD WINAPI WatcherThreadProc(LPVOID lpParameter);
+static VOID ArmShowSuppression(HWND hWnd);
+static VOID EndShowSuppression(HWND hWnd);
 
 // Written only by the tray thread (WM_CREATE / WM_DESTROY), read by the
 // watcher thread. A HWND is pointer-sized, so aligned reads/writes are atomic;
@@ -49,19 +55,6 @@ static DWORD WINAPI WatcherThreadProc(LPVOID lpParameter);
 // loop. Worst case a post races window destruction and is dropped, which is
 // harmless: WM_CREATE recomputes the state itself.
 static HWND volatile hTrayWnd;
-
-// Armed by the watcher thread when CEF auto-restores after a game exits
-// (never on an explicit "On" pick - see the loop in WatcherThreadProc), and
-// consumed by WinEventProc's EVENT_OBJECT_SHOW handling below, which hides
-// the first Steam window that shows itself afterwards. This is what "-silent"
-// suppresses at Steam's own startup; nothing plays that role for CEF coming
-// back mid-session, so Steam pops its main window back to the foreground
-// every time. A GetTickCount64 deadline, not just a boolean, so a show that
-// was already in flight when the grace period lapses is left alone rather
-// than suppressed indefinitely by a flag nothing ever clears. 64-bit reads/
-// writes of an aligned variable are atomic on the x86-64 target this builds
-// for, so no separate lock is needed between the two threads touching it.
-static volatile ULONGLONG gSuppressShowUntilTick;
 
 // DllMainCRTStartup's hLibModule, not GetModuleHandleW(NULL): this code runs
 // inside steam.exe's process, and GetModuleHandleW(NULL) would resolve to
@@ -311,6 +304,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         // still running. The icon still shows the requested mode, since that is
         // what the menu selected; the tooltip is where the disagreement goes.
         BOOL applied = (BOOL)lParam;
+        // CEF is going away again - another game, or Off - so whatever Steam
+        // shows from here on is not the window the last restore popped up.
+        if (disabled)
+            EndShowSuppression(hWnd);
         trayDisabled = disabled;
         nid.hIcon = disabled ? hIconOff : hIconOn;
         lstrcpyW(nid.szTip, disabled ? L"Steam WebHelper - CEF Disabled" : L"Steam WebHelper - CEF Enabled");
@@ -338,6 +335,22 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             iconWithdrawn = FALSE;
             Shell_NotifyIconW(NIM_ADD, &nid);
         }
+        break;
+
+    case WM_SUPPRESSSHOW:
+        // wParam TRUE: the watcher has just brought CEF back on its own after
+        // a game, so the pop-up that follows is to be hidden (see hShowHook).
+        // FALSE: the hook has done that, so it comes down.
+        if (wParam)
+            ArmShowSuppression(hWnd);
+        else
+            EndShowSuppression(hWnd);
+        break;
+
+    case WM_TIMER:
+        // Nothing popped up in time; Steam showing a window later is left alone.
+        if (wParam == IDT_SUPPRESSSHOW)
+            EndShowSuppression(hWnd);
         break;
 
     case WM_REHOTKEY:
@@ -548,6 +561,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         // and the window goes with it. WM_STEAMUI is what removes the icon then.
         Shell_NotifyIconW(NIM_DELETE, &nid);
         UnregisterHotKey(hWnd, IDH_TOGGLE);
+        EndShowSuppression(hWnd);
         hTrayWnd = NULL;
         // Release the cached icons and menu fonts. DEFAULT_GUI_FONT is a stock
         // object and DeleteObject is a harmless no-op on it, so the font
@@ -686,6 +700,118 @@ static VOID TerminateCollected(HANDLE *handles, UINT count)
     }
 }
 
+// ---- Post-game pop-up suppression ------------------------------------------
+// When CEF comes back on its own after a game, Steam starts steamwebhelper.exe
+// again and its main window pops up in front, as if Steam had just been
+// launched: what "-silent" suppresses at Steam's own startup, and nothing does
+// mid-session. So for a few seconds after such a restore (never after an
+// explicit "On" pick - see WatcherThreadProc) the first main window Steam's
+// webhelper shows is hidden again.
+//
+// That window belongs to steamwebhelper.exe, not to steam.exe. A trace of a
+// real game exit on the current client showed it as an unowned "SDL_app"
+// window titled "Steam", shown by the freshly started webhelper 2.3 s after
+// the game ended, while every steam.exe window stayed hidden throughout - so
+// this needs a hook on other processes' events, which only exists while armed.
+// Hiding it from outside is something SDL, whose window class that is, keeps
+// track of: SDL2 and SDL3 both turn WM_SHOWWINDOW(FALSE) into their own hidden
+// state, so a later show from Steam - its tray icon, say - brings it back.
+//
+// Tray thread only: the hook is installed there, which is also where its
+// out-of-context events are delivered.
+static HWINEVENTHOOK hShowHook;
+static BOOL showSuppressionArmed;
+
+// Whether pid is Steam's own steamwebhelper.exe: named that, and living in
+// Steam's folder - the same folder test the terminate path applies.
+static BOOL IsSteamWebHelper(DWORD pid)
+{
+    if (!EnsureSteamDir())
+        return FALSE;
+
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!hProcess)
+        return FALSE;
+    WCHAR imgPath[MAX_PATH];
+    DWORD imgPathLen = MAX_PATH;
+    BOOL ok = QueryFullProcessImageNameW(hProcess, 0, imgPath, &imgPathLen);
+    CloseHandle(hProcess);
+    if (!ok || imgPathLen <= gSteamDirChars ||
+        CompareStringOrdinal(imgPath, (INT)gSteamDirChars, gSteamDir, (INT)gSteamDirChars, TRUE) != CSTR_EQUAL)
+        return FALSE;
+
+    DWORD name = 0; // start of the file name, just past the last backslash
+    for (DWORD i = 0; i < imgPathLen; i++)
+        if (imgPath[i] == L'\\')
+            name = i + 1;
+    return CompareStringOrdinal(imgPath + name, (INT)(imgPathLen - name), L"steamwebhelper.exe", -1, TRUE) ==
+           CSTR_EQUAL;
+}
+
+static VOID CALLBACK SuppressShowProc(HWINEVENTHOOK hWinEventHook, DWORD event, HWND hwnd, LONG idObject,
+                                      LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime)
+{
+    (void)hWinEventHook;
+    (void)event;
+    (void)dwEventThread;
+    (void)dwmsEventTime;
+
+    // Events already queued can still arrive once the one-shot below has fired.
+    if (!showSuppressionArmed || idObject != OBJID_WINDOW || idChild != CHILDID_SELF)
+        return;
+
+    // The main window is top-level and unowned; the menus and popups Steam
+    // hangs off it are owned by it, and are left alone.
+    if (GetAncestor(hwnd, GA_ROOT) != hwnd || GetWindow(hwnd, GW_OWNER))
+        return;
+
+    // Room to spare so a longer class name sharing the prefix cannot be
+    // truncated into a false match.
+    WCHAR szClassName[64] = {0};
+    GetClassNameW(hwnd, szClassName, ARRAYSIZE(szClassName));
+    if (CompareStringOrdinal(szClassName, -1, L"SDL_app", -1, FALSE) != CSTR_EQUAL)
+        return;
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (!IsSteamWebHelper(pid))
+        return;
+
+    // One-shot: only the first window the restore pops up is hidden, and
+    // anything shown after it - the user reopening Steam straight away
+    // included - is left alone. Async, so a busy webhelper cannot stall this
+    // thread; the hook itself comes down from the message loop, not from
+    // inside its own callback.
+    showSuppressionArmed = FALSE;
+    ShowWindowAsync(hwnd, SW_HIDE);
+    HWND hWnd = hTrayWnd;
+    if (hWnd)
+        PostMessageW(hWnd, WM_SUPPRESSSHOW, FALSE, 0);
+}
+
+static VOID ArmShowSuppression(HWND hWnd)
+{
+    if (!hShowHook)
+        hShowHook = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, NULL, SuppressShowProc, 0, 0,
+                                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    // SetTimer on an id that is already running restarts it, so a restore that
+    // arrives while armed gets the full window again.
+    showSuppressionArmed = hShowHook && SetTimer(hWnd, IDT_SUPPRESSSHOW, SUPPRESS_SHOW_MS, NULL);
+    if (!showSuppressionArmed)
+        EndShowSuppression(hWnd);
+}
+
+static VOID EndShowSuppression(HWND hWnd)
+{
+    showSuppressionArmed = FALSE;
+    KillTimer(hWnd, IDT_SUPPRESSSHOW);
+    if (hShowHook)
+    {
+        UnhookWinEvent(hShowHook);
+        hShowHook = NULL;
+    }
+}
+
 // Apply the desired CEF state to Steam's UI thread, tracking whether we have
 // it currently suspended so the suspend count stays balanced. SuspendThread
 // keeps a *count*, not a flag: without this guard two "disabled" events in a
@@ -811,23 +937,29 @@ static DWORD WINAPI WatcherThreadProc(LPVOID lpParameter)
 
         // Same collect-then-suspend-then-terminate ordering as the initial
         // apply above; see there for why the snapshot must not happen while
-        // Steam's UI thread is frozen.
+        // Steam's UI thread is frozen. That rules out collecting while it is
+        // frozen *already*, too - a wake during a game or in Off mode, when an
+        // override pick or any value Steam writes under its key lands here with
+        // CEF still disabled - and there is nothing to collect then anyway:
+        // the webhelpers died with the suspend, and a trace of a real game
+        // showed none start again until the moment Steam was resumed.
         HANDLE kill[MAX_WEBHELPERS];
-        UINT killCount = disabled ? CollectWebHelperChildren(kill, MAX_WEBHELPERS) : 0;
+        UINT killCount = disabled && !suspended ? CollectWebHelperChildren(kill, MAX_WEBHELPERS) : 0;
         BOOL applied = ApplyThreadState(hThread, disabled, &suspended);
         TerminateCollected(kill, killCount);
 
-        // Only arm the suppression window on an *automatic* restore (game
-        // exited, override still Auto). An explicit "On" pick means the user
-        // asked for CEF back themselves, so Steam showing its window is the
-        // expected, wanted outcome there, not something to hide.
-        if (wasSuspended && !disabled && GetOverride() == OVERRIDE_AUTO)
-            gSuppressShowUntilTick = GetTickCount64() + 8000;
+        // Only suppress the pop-up on an *automatic* restore (game exited,
+        // override still Auto). An explicit "On" pick means the user asked for
+        // CEF back themselves, so Steam showing its window is the expected,
+        // wanted outcome there, not something to hide.
+        BOOL autoRestore = wasSuspended && !disabled && GetOverride() == OVERRIDE_AUTO;
 
         HWND hWnd = hTrayWnd;
         if (hWnd)
         {
             PostMessageW(hWnd, WM_TRAYSTATE, disabled, applied);
+            if (autoRestore)
+                PostMessageW(hWnd, WM_SUPPRESSSHOW, TRUE, 0);
             // The hotkey binding lives under the same key as the mode override,
             // so a change to it arrives on this event too. Re-reading only when
             // that key fired keeps a Steam RunningAppID change from pointlessly
@@ -927,28 +1059,6 @@ static VOID CALLBACK WinEventProc(HWINEVENTHOOK hWinEventHook, DWORD event, HWND
     {
         if (idObject == OBJID_WINDOW && idChild == CHILDID_SELF)
             ForgetSteamUiWindow(hwnd);
-        return;
-    }
-
-    // idObject == OBJID_WINDOW means the window itself just showed, not one
-    // of its child controls - EVENT_OBJECT_SHOW otherwise fires constantly
-    // for every button/label inside it as the page renders.
-    if (event == EVENT_OBJECT_SHOW && idObject == OBJID_WINDOW)
-    {
-        ULONGLONG deadline = gSuppressShowUntilTick;
-        if (deadline && GetTickCount64() < deadline)
-        {
-            WCHAR szClassName[64] = {0};
-            GetClassNameW(hwnd, szClassName, ARRAYSIZE(szClassName));
-            if (CompareStringOrdinal(L"vguiPopupWindow", -1, szClassName, -1, FALSE) == CSTR_EQUAL)
-            {
-                // One-shot: only the first window auto-restore pops back up is
-                // suppressed. Anything shown afterwards (including the user
-                // manually reopening Steam a second later) is left alone.
-                gSuppressShowUntilTick = 0;
-                ShowWindow(hwnd, SW_HIDE);
-            }
-        }
         return;
     }
 
@@ -1083,11 +1193,11 @@ static DWORD WINAPI HookThreadProc(LPVOID lpParameter)
 {
     (void)lpParameter;
 
-    // Range covers CREATE (tray/watcher bootstrap), DESTROY (taking the tray
-    // icon down as Steam exits - see gSteamUiWindows), and SHOW (the auto-
-    // restore suppression above). EVENT_OBJECT_HIDE is one past the end of
-    // this range and is intentionally excluded - nothing here needs it.
-    if (!SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_SHOW, NULL, WinEventProc, GetCurrentProcessId(), 0,
+    // Range covers CREATE (tray/watcher bootstrap) and DESTROY (taking the
+    // tray icon down as Steam exits - see gSteamUiWindows). The pop-up after a
+    // game is a window of another process, so its suppression has a hook of
+    // its own on the tray thread; see hShowHook.
+    if (!SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, NULL, WinEventProc, GetCurrentProcessId(), 0,
                          WINEVENT_OUTOFCONTEXT))
         return EXIT_FAILURE;
 
