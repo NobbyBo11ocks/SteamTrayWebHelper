@@ -12,7 +12,7 @@
 ; ============================================================================
 
 #define MyAppName "NoSteamWebHelper"
-#define MyAppVersion "1.2.5"
+#define MyAppVersion "1.2.6"
 #define MyAppPublisher "NoSteamWebHelper"
 #define MyAppURL "https://github.com/NobbyBo11ocks/SteamTrayWebHelper"
 #define DllSource "..\src\bin\umpdc.dll"
@@ -161,17 +161,45 @@ begin
   ApplyDarkTitleBar(UninstallProgressForm.Handle);
 end;
 
-{ ---- Is steam.exe currently running? ------------------------------------- }
+{ ---- Only this user's Steam: Setup's own Windows session ------------------ }
+{ Every signed-in user has a session of their own, and Setup runs in the
+  session of whoever started it, elevated or not. Setup is elevated, so an
+  unfiltered "taskkill /IM steam.exe" reaches every user's processes on the PC,
+  and an unfiltered tasklist sees them too. Everything below is limited to this
+  session - the line Windows' own Restart Manager draws as well: it "respects
+  the privileges that separate different user or terminal sessions". A Steam
+  in another session that still holds the DLL is left to that check (Inno's
+  CloseApplications), which reports it rather than killing it. }
+function GetCurrentProcessId(): DWORD;
+  external 'GetCurrentProcessId@kernel32.dll stdcall';
+function ProcessIdToSessionId(dwProcessId: DWORD; var pSessionId: DWORD): BOOL;
+  external 'ProcessIdToSessionId@kernel32.dll stdcall';
+
+{ A tasklist/taskkill filter for Setup's own session. False if the session
+  cannot be determined, in which case callers act on no process rather than on
+  every session's. }
+function OwnSessionFilter(var Filter: String): Boolean;
+var
+  SessionId: DWORD;
+begin
+  Result := ProcessIdToSessionId(GetCurrentProcessId(), SessionId);
+  if Result then
+    Filter := '/FI "SESSION eq ' + IntToStr(SessionId) + '"';
+end;
+
+{ ---- Is steam.exe currently running in this session? --------------------- }
 function IsSteamRunning(): Boolean;
 var
   Rc: Integer;
-  TmpFile: String;
+  TmpFile, Session: String;
   Content: AnsiString;
 begin
   Result := False;
+  if not OwnSessionFilter(Session) then
+    Exit;
   TmpFile := ExpandConstant('{tmp}\nswh_tasklist.txt');
   if Exec(ExpandConstant('{cmd}'),
-          '/C tasklist /FI "IMAGENAME eq steam.exe" /NH > "' + TmpFile + '"',
+          '/C tasklist /FI "IMAGENAME eq steam.exe" ' + Session + ' /NH > "' + TmpFile + '"',
           '', SW_HIDE, ewWaitUntilTerminated, Rc) then
   begin
     if LoadStringFromFile(TmpFile, Content) then
@@ -184,7 +212,7 @@ end;
 procedure ForceCloseSteam();
 var
   Rc, I: Integer;
-  SteamExe: String;
+  SteamExe, Session: String;
 begin
   SteamExe := ExpandConstant('{app}\steam.exe');
   if FileExists(SteamExe) then
@@ -213,10 +241,12 @@ begin
     Sleep(1000);
   end;
 
-  { Still up: terminate the webhelper children first, then steam.exe. }
-  Exec(ExpandConstant('{cmd}'),
-       '/C taskkill /F /IM steamwebhelper.exe & taskkill /F /IM steam.exe',
-       '', SW_HIDE, ewWaitUntilTerminated, Rc);
+  { Still up: terminate the webhelper children first, then steam.exe - only
+    those in this session, never another signed-in user's. }
+  if OwnSessionFilter(Session) then
+    Exec(ExpandConstant('{cmd}'),
+         '/C taskkill ' + Session + ' /IM steamwebhelper.exe /F & taskkill ' + Session + ' /IM steam.exe /F',
+         '', SW_HIDE, ewWaitUntilTerminated, Rc);
   Sleep(1500);
 end;
 
