@@ -4,6 +4,18 @@ Notable changes per release. The section matching a tag becomes that release's
 notes on the [Releases page](https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases),
 so keep the heading exactly `## <version>`.
 
+## Unreleased
+
+### Fixed
+
+- Setup and the uninstaller no longer close other users' Steam. Both run as
+  administrator, and their check for a running Steam and their last-resort
+  `taskkill` matched every `steam.exe` and `steamwebhelper.exe` on the PC by
+  name - including those of other signed-in users. Both are now limited to
+  Setup's own Windows session, the same boundary Windows' Restart Manager keeps.
+  A Steam in another session that still has the DLL loaded is reported by
+  Setup's built-in in-use check instead of being killed.
+
 ## 1.2.5
 
 ### Fixed
