@@ -4,6 +4,21 @@ Notable changes per release. The section matching a tag becomes that release's
 notes on the [Releases page](https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases),
 so keep the heading exactly `## <version>`.
 
+## Unreleased
+
+### Fixed
+
+- **Steam's main window no longer pops up when a game closes.** The
+  suppression added in 1.2.0 waited for `steam.exe` to show a
+  `vguiPopupWindow`, but in Steam's current client the main window belongs to
+  `steamwebhelper.exe`. A trace of a real game exit showed it as an `SDL_app`
+  window titled "Steam", shown by the freshly restarted `steamwebhelper.exe`
+  2.3 seconds after the game ended, while no `steam.exe` window was shown at
+  all - so the suppression never fired. It now watches for that window
+  instead: still only for about 8 seconds after an automatic restore, and
+  still only the first window, so reopening Steam from its tray icon works as
+  before.
+
 ## 1.2.6
 
 ### Fixed
