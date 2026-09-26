@@ -4,6 +4,37 @@ Notable changes per release. The section matching a tag becomes that release's
 notes on the [Releases page](https://github.com/NobbyBo11ocks/SteamTrayWebHelper/releases),
 so keep the heading exactly `## <version>`.
 
+## 1.2.5
+
+### Fixed
+
+- **The tray icon no longer stays behind after Steam exits.** Exiting Steam
+  ends the helper's threads without running any of their cleanup, so the icon
+  was never removed and lingered until the mouse passed over it. Removing it
+  while the DLL unloads is something Microsoft documents as unsafe. Instead,
+  the icon now comes down when Steam destroys its own UI windows on the way
+  out - which a trace of a real Steam exit showed happening 1.5 seconds before
+  the process ends - and comes back if those windows ever return.
+- The DLL now only runs inside `steam.exe`. Windows searches an application's
+  own folder for a DLL before System32, so any other program in Steam's folder
+  that loads `umpdc.dll` - `GameOverlayUI.exe` and `steamerrorreporter.exe` live
+  there too - would get this DLL as well, and nothing stopped it starting there.
+  In a host that created a titled `vguiPopupWindow`, that meant a second tray
+  icon and that program's UI thread suspended for as long as a game ran.
+- The DLL can no longer be unloaded out from under its own threads. Its
+  background thread runs for the life of the process, but nothing kept the DLL
+  mapped if whatever loaded `umpdc.dll` freed it again - and the next time that
+  thread woke, it would run code that was no longer there and crash Steam.
+  Reproduced by loading and freeing the previous build; the module is now
+  pinned before the thread starts.
+- Setup no longer starts `steam.exe` with administrator rights when it asks a
+  running Steam to close. Inno Setup's `Exec` runs a program with Setup's own
+  elevated credentials; `ExecAsOriginalUser` is used instead. The uninstaller
+  still uses `Exec`, the only option Inno Setup supports there.
+- The README no longer says to run the installer as administrator. It already
+  asks for elevation itself, and starting it with "Run as administrator" stops
+  Setup from launching Steam as the signed-in user afterwards.
+
 ## 1.2.4
 
 ### Fixed
